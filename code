@@ -1,0 +1,129 @@
+####################
+## LOADING REQUIRED LIBRARIES
+####################
+library(tidyverse)
+library(rockchalk)
+library(readxl)
+library(data.table)
+library(mapboxapi)
+
+###SETTING OPTION FOR SCIENTIFIC NOTATION
+options(scipen = 999)
+
+####################
+## PROVIDING API TO CONNECT TO MAPBOX API
+####################
+
+my_token <- "pk.eyJ1IjoiYmNvbmdlbGlvIiwiYSI6ImNrdDNxZ2w2ODBhYmYydW5xZGg4OWJiNzkifQ.VwsWe9ZNilYhBXd3hA0vlQ"
+mb_access_token(my_token, install = TRUE) ##FOR MAPBOX API
+Sys.getenv("MAPBOX_PUBLIC_TOKEN")
+
+
+####################
+####################
+## CALCULATING DRIVNG TIME TO EACH PROPERTY ADDRESS
+####################
+####################
+
+#################
+##THIS IS ALL NEW IN ORDER TO GET ADDITIONAL PROPERTYINFO ADDED TO SOFI.DATA DF
+#################
+
+dir <- "D:\\ZTRAX\\Research\\SoFiStadium\\Data\\aug2020"  ###Switching to Correct Directory
+
+###CALLING IN LAYOUT STYLESHEET
+layoutZAsmt <- read_excel(file.path(dir, 'layout.xlsx'), sheet = 1)
+layoutZTrans <- read_excel(file.path(dir, 'layout.xlsx'), 
+                           sheet = 2,
+                           col_types = c("text", "text", "numeric", "text", "text"))
+
+
+######################
+### PropertyInfo.txt ###
+######################
+
+###CREATING DATA.TABLE OF utPropertyInfo.TXT Stylesheet
+col_namesPropertyInfo <- layoutZTrans[layoutZTrans$TableName == 'utPropertyInfo', 'FieldName']
+
+###PIVOTING STYLESHEETS TO WIDE FORMAT
+col_namesPropertyInfo <- col_namesPropertyInfo %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+###GRABBING PROPERTY ADDRESS INFORMATION (THIS ADDS ONTO THE ALREADY CREATED SOFI.DATA DF)
+california.propertyinfo <- fread(file.path(dir, "\\ZTrans\\PropertyInfo.txt"),
+                                  select = c(1,16,53,54),
+                                  sep = '|',
+                                  header = FALSE,
+                                  stringsAsFactors = FALSE,       
+                                  quote = "")
+##RENAMING THE COLUMNS
+california.propertyinfo <- california.propertyinfo %>%
+  dplyr::rename(
+    RowID = V1,
+    PropertyAddress = V16,
+    PropertyLatitude = V53,
+    PropertyLongitude = V54
+  )
+
+##LEFT JOINING THE NEW PROPERTY ADDRESS INFORMATION TO ALREADY CREATED SOFI.DATA DF
+sofi.data <- left_join(sofi.data, california.propertyinfo, by = c("TransID" = "RowID"))
+
+##CREATING NEW COLUMN THAT PASTE TOGETHER STREET ADDRESS AND CITY
+sofi.data$complete.address <- with(sofi.data, paste(PropertyAddress, City))
+
+#################
+##NOW GEOCODING TO GET DRIVING DISTANCE FROM SOFI STADIUM TO EACH PROPERTY ADDRESS
+#################
+
+sofi_sf <- sofi.data %>%
+  drop_na(PropertyLatitude, PropertyLongitude) %>%
+  dplyr::select(PropertyLatitude, PropertyLongitude)
+
+sofi_sf <- st_as_sf(sofi_sf, coords = c("PropertyLongitude", "PropertyLatitude"),
+                       agr = "constant")
+
+plot(st_geometry(sofi_sf))
+
+testing_sf <- testing_sf %>%
+  dplyr::select(geometry)
+
+##GETTING THE PHYSICAL LOCATION OF SOFI STADIUM
+sofi.stadium.location <- mb_geocode("SoFi Stadium, Los Angeles CA")
+
+time_to_stadium <- mb_matrix(origins = testing_sf,
+                             destinations = sofi.stadium.location) %>%
+  as.vector()
+
+#################
+##HOME PRICES DID CODING
+#################
+
+sofi.cleaned <- sofi.data
+
+sofi.cleaned <- sofi.cleaned %>%
+  filter(SalesPrice >= 1000 & SalesPrice <= 1000000) %>%
+  filter(distance <= 20)
+
+sofi.cleaned$post16 = as.numeric(sofi.cleaned$year >= 2016)
+
+sofi.cleaned <- sofi.cleaned %>%
+  mutate(distance_ord = factor(
+    case_when(
+      distance <= 5                   ~ "Short",
+      distance >= 5.000001 & distance <= 10  ~ "Moderate",
+      distance >= 10.00001 & distance <= 20 ~ "Long")))
+
+model <- lm(SalesPrice ~ relevel(distance_ord, ref = "Short") * post16 + age + TotalBedrooms + 
+              TotalCalculatedBath + SqFt, data = sofi.cleaned)
+
+summary(model)
+
+
+#################
+##MEANS CENTERING THE REGRESSION MODEL ... STILL DECIDING ON THIS
+#################
+
+v.center <- c("TotalBedrooms", "SqFt", "age", "TotalCalculatedBath")
+
+meanCenter(model, centerOnlyInteractors = TRUE, centerDV = FALSE,
+           standardize = TRUE, terms = v.center)
