@@ -6,6 +6,8 @@ library(rockchalk)
 library(readxl)
 library(data.table)
 library(mapboxapi)
+library(sf)
+library(geosphere)
 
 ###SETTING OPTION FOR SCIENTIFIC NOTATION
 options(scipen = 999)
@@ -15,19 +17,13 @@ options(scipen = 999)
 ####################
 
 my_token <- "pk.eyJ1IjoiYmNvbmdlbGlvIiwiYSI6ImNrdDNxZ2w2ODBhYmYydW5xZGg4OWJiNzkifQ.VwsWe9ZNilYhBXd3hA0vlQ"
-mb_access_token(my_token, install = TRUE) ##FOR MAPBOX API
+mb_access_token(my_token, install = TRUE, overwrite = TRUE) ##FOR MAPBOX API
 Sys.getenv("MAPBOX_PUBLIC_TOKEN")
+readRenviron("~/.Renviron")
 
-
 ####################
+## MOVING TO ZTRAX DATA NOW
 ####################
-## CALCULATING DRIVNG TIME TO EACH PROPERTY ADDRESS
-####################
-####################
-
-#################
-##THIS IS ALL NEW IN ORDER TO GET ADDITIONAL PROPERTYINFO ADDED TO SOFI.DATA DF
-#################
 
 dir <- "D:\\ZTRAX\\Research\\SoFiStadium\\Data\\aug2020"  ###Switching to Correct Directory
 
@@ -45,62 +41,197 @@ layoutZTrans <- read_excel(file.path(dir, 'layout.xlsx'),
 ###CREATING DATA.TABLE OF utPropertyInfo.TXT Stylesheet
 col_namesPropertyInfo <- layoutZTrans[layoutZTrans$TableName == 'utPropertyInfo', 'FieldName']
 
+
 ###PIVOTING STYLESHEETS TO WIDE FORMAT
 col_namesPropertyInfo <- col_namesPropertyInfo %>%
   pivot_wider(names_from = FieldName, values_from = FieldName)
 
-###GRABBING PROPERTY ADDRESS INFORMATION (THIS ADDS ONTO THE ALREADY CREATED SOFI.DATA DF)
-california.propertyinfo <- fread(file.path(dir, "\\ZTrans\\PropertyInfo.txt"),
-                                  select = c(1,16,53,54),
+###GATHERING SOFI STADIUM INFORMATION
+sofistadium.propertyinfo <- fread(file.path(dir, "\\ZTrans\\PropertyInfo.txt"),
+                                  select = c(1, 16, 17, 53, 54, 55, 63),
                                   sep = '|',
                                   header = FALSE,
                                   stringsAsFactors = FALSE,       
                                   quote = "")
+
 ##RENAMING THE COLUMNS
-california.propertyinfo <- california.propertyinfo %>%
+sofistadium.propertyinfo <- sofistadium.propertyinfo %>%
   dplyr::rename(
-    RowID = V1,
+    TransID = V1,
     PropertyAddress = V16,
+    PropertyCity = V17,
     PropertyLatitude = V53,
-    PropertyLongitude = V54
+    PropertyLongitude = V54,
+    PropertyCensusTract = V55,
+    PropertyCounty = V63
   )
 
-##LEFT JOINING THE NEW PROPERTY ADDRESS INFORMATION TO ALREADY CREATED SOFI.DATA DF
-sofi.data <- left_join(sofi.data, california.propertyinfo, by = c("TransID" = "RowID"))
 
-##CREATING NEW COLUMN THAT PASTE TOGETHER STREET ADDRESS AND CITY
-sofi.data$complete.address <- with(sofi.data, paste(PropertyAddress, City))
+######################
+### Main.txt ### this gets the sales prices & date
+######################
 
-#################
-##NOW GEOCODING TO GET DRIVING DISTANCE FROM SOFI STADIUM TO EACH PROPERTY ADDRESS
-#################
 
-sofi_sf <- sofi.data %>%
-  drop_na(PropertyLatitude, PropertyLongitude) %>%
-  dplyr::select(PropertyLatitude, PropertyLongitude)
+###CREATING DATA.TABLE OF utMain.TXT Stylesheet
+col_namesMain <- layoutZTrans[layoutZTrans$TableName == 'utMain', 'FieldName']
 
-sofi_sf <- st_as_sf(sofi_sf, coords = c("PropertyLongitude", "PropertyLatitude"),
-                       agr = "constant")
+col_namesMain <- col_namesMain %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
 
-plot(st_geometry(sofi_sf))
+sofistadium.main <- fread(file.path(dir, "\\ZTrans\\Main.txt"),
+                          select = c(1,18,25),
+                          sep = '|',
+                          header = FALSE,
+                          stringsAsFactors = FALSE,       
+                          quote = "")
 
-testing_sf <- testing_sf %>%
-  dplyr::select(geometry)
+sofistadium.main <- sofistadium.main %>%
+  dplyr::rename(
+    TransID = V1,
+    Date = V18,
+    SalesPrice = V25
+  )
 
-##GETTING THE PHYSICAL LOCATION OF SOFI STADIUM
-sofi.stadium.location <- mb_geocode("SoFi Stadium, Los Angeles CA")
+###DROPPING ANY ROWS THAT INCLUDE MISSING INFORMATION
+sofistadium.main <- na.omit(sofistadium.main)
 
-time_to_stadium <- mb_matrix(origins = testing_sf,
-                             destinations = sofi.stadium.location) %>%
-  as.vector()
+###MERGING PROPERTYINFO WITH MAIN INFO & AGAIN CHECKING FOR MISSING INFORMATION
+sofi.data <- left_join(sofistadium.propertyinfo, sofistadium.main, by = c("TransID" = "TransID"))
+sofi.data <- na.omit(sofi.data)
+
+###FILTERING DOWN TO JUST LOS ANGELES COUNTY
+sofi.data <- sofi.data %>%
+  filter(PropertyCounty == 6037)
+
+
+
+######################
+### NOTE: SWITCHING TO ASSESSMENT HERE
+### building.txt ### getting information re. each house
+######################
+
+###CREATING DATA.TABLE OF utBuilding.TXT Stylesheet
+col_namesBuilding <- layoutZAsmt[layoutZAsmt$TableName == 'utBuilding', 'FieldName']
+
+col_namesBuilding <- col_namesBuilding %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+sofistadium.buildings <- fread(file.path(dir, "\\ZAsmt\\Building.txt"),
+                          select = c(1, 2, 13, 15, 20, 26),
+                          sep = '|',
+                          header = FALSE,
+                          stringsAsFactors = FALSE,       
+                          quote = "")
+
+sofistadium.buildings <- sofistadium.buildings %>%
+  dplyr::rename(
+    TransID = V1,
+    NoOfUnits = V2,
+    BuildingQuality = V13,
+    YearBuilt = V15,
+    TotalBedrooms = V20,
+    CalculatedBath = V26
+  )
+
+##CREAING A COLUMN TO CALCULATE BUILDING AGE
+sofistadium.buildings$age <- 2022 - sofistadium.buildings$YearBuilt
+
+
+######################
+### NOTE: SWITCHING TO ASSESSMENT HERE
+### BuildingArea.txt ### getting SQFT
+######################
+
+###CREATING DATA.TABLE OF utBuilding.TXT Stylesheet
+col_namesBuildingAreas <- layoutZAsmt[layoutZAsmt$TableName == 'utBuildingAreas', 'FieldName']
+
+col_namesBuildingAreas <- col_namesBuildingAreas %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+sofistadium.buildingsAreas <- fread(file.path(dir, "\\ZAsmt\\BuildingAreas.txt"),
+                               select = c(1, 5, 7),
+                               sep = '|',
+                               header = FALSE,
+                               stringsAsFactors = FALSE,       
+                               quote = "")
+
+sofistadium.buildingsAreas <- sofistadium.buildingsAreas %>%
+  dplyr::rename(
+    TransID = V1,
+    SqFeet = V5,
+    BatchID = V7
+  )
+
+###MERGING BUILDING INFORMATION TOGETHER AND DROPPING ROWS WITH MISSING INFORMATION
+sofi.merged.buildings <- left_join(sofistadium.buildings,
+                                   sofistadium.buildingsAreas, by = c("TransID" = "TransID"))
+sofi.merged.buildings <- na.omit(sofi.merged.buildings)
+
+###MERGING INTO THE MAIN DATA AGAIN
+sofi.data <- left_join(sofi.data, sofi.merged.buildings, by = c("TransID" = "TransID"))
+
+
+
+####################
+## GETTING READY TO MERGE CENSUS WITH ZTRAX DATA
+####################
+
+###GETTING ALL CENSUS TRACTS IN LOS ANAGLES COUNTY
+la.county.tracts <- tracts("CA", county = "Los Angeles")
+
+###SELECTING JUST THE NEEDED COLUMNS ... LESS RESOURCE INTENSIVE
+la.county.tracts <- la.county.tracts %>%
+  dplyr::select(GEOID, ALAND, AWATER, INTPTLON, INTPTLON, geometry)
+
+###SELECTING JUST THE FIRST 12 DIDGITS OF ZTRAX AND RENAMING IT AS GEOID
+sofi.data$GEOID <- sofi.data$PropertyCensusTract %>%
+  substr(1,12)
+
+###DROPPING THE PERIOD FROM THE NEW GEOID COLUMN
+sofi.data$GEOID <- sub("\\.", "", sofi.data$GEOID)
+
+###MERGING THE TRACTS INFORMATION INTO OUR MAIN SOFI.DATA DF
+sofi.data <- left_join(sofi.data, la.county.tracts, by = c("GEOID" = "GEOID"))
+head(sofi.data)
+
+####################
+## GETTING DRIVING TIME FROM SOFI TO INDIVIDUAL HOUSE ADDRESSES NOW **NOT WORKING NEED GRANT MONEY 
+####################
+
+isochrones <- mb_isochrone("SoFi Stadium, Inglewood CA",
+                           profile = "driving",
+                           time = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15))
+
+mapdeck(style = mapdeck_style("street")) %>%
+  add_polygon(data = isochrones,
+              fill_colour = "time",
+              fill_opacity = 0.1,
+              legend = TRUE)
+
+head(sofi.data)
+
+
+sofistadium.propertyinfo <- sofistadium.propertyinfo %>%
+  mutate(sofilat = 33.95356,
+         sofilog = -118.33859)
+
+meter2mile <- 0.000621371
+
+sofistadium.propertyinfo[, distance := meter2mile * geosphere::distVincentyEllipsoid(
+  cbind(PropertyLongitude, PropertyLatitude),
+  cbind(sofilog, sofilat)) ]
+sofistadium.propertyinfo
+
+head(sofistadium.propertyinfo)
+
+
+
 
 #################
 ##HOME PRICES DID CODING
 #################
 
-sofi.cleaned <- sofi.data
-
-sofi.cleaned <- sofi.cleaned %>%
+sofi.data <- sofi.data %>%
   filter(SalesPrice >= 1000 & SalesPrice <= 1000000) %>%
   filter(distance <= 20)
 
@@ -109,7 +240,7 @@ sofi.cleaned$post16 = as.numeric(sofi.cleaned$year >= 2016)
 sofi.cleaned <- sofi.cleaned %>%
   mutate(distance_ord = factor(
     case_when(
-      distance <= 5                   ~ "Short",
+      distance <= 5 ~ "Short",
       distance >= 5.000001 & distance <= 10  ~ "Moderate",
       distance >= 10.00001 & distance <= 20 ~ "Long")))
 
