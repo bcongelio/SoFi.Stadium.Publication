@@ -48,7 +48,7 @@ col_namesPropertyInfo <- col_namesPropertyInfo %>%
 
 ###GATHERING SOFI STADIUM INFORMATION
 sofistadium.propertyinfo <- fread(file.path(dir, "\\ZTrans\\PropertyInfo.txt"),
-                                  select = c(1, 16, 17, 53, 54, 55, 63),
+                                  select = c(1, 16, 17, 53, 54, 55, 63, 65),
                                   sep = '|',
                                   header = FALSE,
                                   stringsAsFactors = FALSE,       
@@ -63,7 +63,8 @@ sofistadium.propertyinfo <- sofistadium.propertyinfo %>%
     PropertyLatitude = V53,
     PropertyLongitude = V54,
     PropertyCensusTract = V55,
-    PropertyCounty = V63
+    PropertyCounty = V63,
+    ParcelID = V65
   )
 
 
@@ -104,6 +105,30 @@ sofi.data <- sofi.data %>%
   filter(PropertyCounty == 6037)
 
 
+######################
+### NOTE: SWITCHING TO ASSESSMENT HERE
+### main.txt ### getting information re. each house
+######################
+
+col_namesAsmtMain <- layoutZAsmt[layoutZAsmt$TableName == 'utMain', 'FieldName']
+
+col_namesAsmtMain <- col_namesAsmtMain %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+sofistadium.asmtmain <- fread(file.path(dir, "\\ZAsmt\\Main.txt"),
+                               select = c(1, 2),
+                               sep = '|',
+                               header = FALSE,
+                               stringsAsFactors = FALSE,       
+                               quote = "")
+
+##RENAMING THE COLUMNS
+sofistadium.asmtmain <- sofistadium.asmtmain %>%
+  dplyr::rename(
+    TransID = V1,
+    ParcelID = V2
+  )
+
 
 ######################
 ### NOTE: SWITCHING TO ASSESSMENT HERE
@@ -117,16 +142,15 @@ col_namesBuilding <- col_namesBuilding %>%
   pivot_wider(names_from = FieldName, values_from = FieldName)
 
 sofistadium.buildings <- fread(file.path(dir, "\\ZAsmt\\Building.txt"),
-                          select = c(1, 2, 13, 15, 20, 26),
-                          sep = '|',
-                          header = FALSE,
-                          stringsAsFactors = FALSE,       
-                          quote = "")
+                               select = c(1, 13, 15, 20, 26),
+                               sep = '|',
+                               header = FALSE,
+                               stringsAsFactors = FALSE,       
+                               quote = "")
 
 sofistadium.buildings <- sofistadium.buildings %>%
   dplyr::rename(
     TransID = V1,
-    NoOfUnits = V2,
     BuildingQuality = V13,
     YearBuilt = V15,
     TotalBedrooms = V20,
@@ -149,26 +173,31 @@ col_namesBuildingAreas <- col_namesBuildingAreas %>%
   pivot_wider(names_from = FieldName, values_from = FieldName)
 
 sofistadium.buildingsAreas <- fread(file.path(dir, "\\ZAsmt\\BuildingAreas.txt"),
-                               select = c(1, 5, 7),
-                               sep = '|',
-                               header = FALSE,
-                               stringsAsFactors = FALSE,       
-                               quote = "")
+                                    select = c(1, 5),
+                                    sep = '|',
+                                    header = FALSE,
+                                    stringsAsFactors = FALSE,       
+                                    quote = "")
 
 sofistadium.buildingsAreas <- sofistadium.buildingsAreas %>%
   dplyr::rename(
     TransID = V1,
-    SqFeet = V5,
-    BatchID = V7
+    SqFeet = V5
   )
 
 ###MERGING BUILDING INFORMATION TOGETHER AND DROPPING ROWS WITH MISSING INFORMATION
-sofi.merged.buildings <- left_join(sofistadium.buildings,
-                                   sofistadium.buildingsAreas, by = c("TransID" = "TransID"))
+sofi.merged.buildings <- left_join(sofistadium.asmtmain, sofistadium.buildings,
+                                   by = c("TransID" = "TransID"))
+
+sofi.merged.buildings <- left_join(sofi.merged.buildings, sofistadium.buildingsAreas,
+                                   by = c("TransID" = "TransID"))
+
 sofi.merged.buildings <- na.omit(sofi.merged.buildings)
 
 ###MERGING INTO THE MAIN DATA AGAIN
 sofi.data <- left_join(sofi.data, sofi.merged.buildings, by = c("TransID" = "TransID"))
+
+sofi.data <- left_join
 
 
 
