@@ -8,6 +8,7 @@ library(data.table)
 library(mapboxapi)
 library(sf)
 library(geosphere)
+library(tidygeocoder) ##USING ArcGIS GEOCODER
 
 ###SETTING OPTION FOR SCIENTIFIC NOTATION
 options(scipen = 999)
@@ -287,3 +288,22 @@ v.center <- c("TotalBedrooms", "SqFt", "age", "TotalCalculatedBath")
 
 meanCenter(model, centerOnlyInteractors = TRUE, centerDV = FALSE,
            standardize = TRUE, terms = v.center)
+           
+           
+#################
+PROCESS TO GEOCODE ZTRAX ADDRESSES
+#################
+
+addresses <- geocode(addresses,
+                      address = address,
+                      method = "arcgis",
+                      full_results = TRUE)
+                      
+                      
+
+##################
+CONVERTING SOFI COORDINATES INTO AN SF OBJECT
+##################  
+
+st_as_sf(coords = c("long", "lat"),
+         crs = st_crs("EPSG:4326"))
