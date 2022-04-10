@@ -1,7 +1,7 @@
-sofi.short <- sofi.data %>%
-  filter(distance_ord == "Short")
+sofi.long <- sofi.data %>%
+  filter(distance_ord == "Long")
 
-sales_rtdf <- rtCreateTrans(trans_df = sofi.short,
+sales_rtdf <- rtCreateTrans(trans_df = sofi.long,
                             prop_id = 'ParcelID',
                             trans_id = 'TransID',
                             price = 'SalesPrice',
@@ -15,14 +15,26 @@ rt_model <- hpiModel(model_type = 'rt',
 
 rt_index <- modelToIndex(model_obj = rt_model)
 
-index.model <- do.call(cbind.data.frame, rt_index)
-index.model$name <- ym(index.model$name)
-index.model$name <- as.Date(index.model$name, format = "%Y-%m-%d")
+index.model.long <- do.call(cbind.data.frame, rt_index)
+index.model.long$name <- ym(index.model.long$name)
+index.model.long$name <- as.Date(index.model.long$name, format = "%Y-%m-%d")
 
+index.model.moderate$distance <- "moderate"
+index.model.short$distance <- "short"
+index.model.long$distance <- "long"
+index.model.short$value <- as.numeric(index.model.short$value)
+index.model.moderate$value <- as.numeric(index.model.moderate$value)
+index.model.long$value <- as.numeric(index.model.long$value)
+combined.index <- rbind(index.model.short, index.model.moderate, index.model.long)
 
-ggplot(data = testing.index, aes(x = date, y = pct.change, label = format(date, "%b-%Y"))) +
-  with_outer_glow(geom_line(colour = "white", size = 1.1, se = FALSE), colour = "dodgerblue", sigma = 5, expand = 4) +
+color.picks <- c("#1e90ff", "#c7eeff", "#b35f15")
+
+ggplot(data = testing.index, aes(x = date, y = pct.change, group = distance, color = distance, label = format(date, "%b-%Y"))) +
+  scale_color_manual(values = c("#fb7756", "#facd60", "#fdfa66")) +
+  with_outer_glow(geom_line(size = 1.1), colour = "black", sigma = 5, expand = 4) +
   geom_point(data = .%>% tail(1), size = 7, alpha = 0.35, aes(y = pct.change), color = "dodgerblue", fill = "white") +
+  geom_point(data = .%>% tail(2), size = 7, alpha = 0.35, aes(y = pct.change), color = "dodgerblue", fill = "white") +
+  geom_point(data = .%>% tail(3), size = 7, alpha = 0.35, aes(y = pct.change), color = "dodgerblue", fill = "white") +
   scale_x_date(date_breaks = "1 years", date_labels = "%Y") +
   scale_y_continuous(#labels = scales::percent,
     breaks = c(100, 150, 200, 250, 300, 350),
@@ -44,11 +56,12 @@ testing.index <- index.model %>%
   mutate(pct.change = (value / lag(value) -1) / 100)
 
 
-testing.index <- index.model %>%
+testing.index <- combined.index %>%
   group_by(year = year(name),
            month = month(name),
            monthf = fct_reorder(format(name, "%b"),month(name)),
-           month = as.factor(month(name))) %>%
+           month = as.factor(month(name)),
+           distance = distance) %>%
   summarize(rate = last(value, na.rm = T),
             date = last(name, na.rm = T)) %>%
   ungroup() %>%
