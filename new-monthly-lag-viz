@@ -30,11 +30,11 @@ combined.index <- rbind(index.model.short, index.model.moderate, index.model.lon
 color.picks <- c("#1e90ff", "#c7eeff", "#b35f15")
 
 ggplot(data = testing.index, aes(x = date, y = pct.change, group = distance, color = distance, label = format(date, "%b-%Y"))) +
-  scale_color_manual(values = c("#fb7756", "#facd60", "#fdfa66")) +
   with_outer_glow(geom_line(size = 1.1), colour = "black", sigma = 5, expand = 4) +
-  geom_point(data = .%>% tail(1), size = 7, alpha = 0.35, aes(y = pct.change), color = "dodgerblue", fill = "white") +
-  geom_point(data = .%>% tail(2), size = 7, alpha = 0.35, aes(y = pct.change), color = "dodgerblue", fill = "white") +
-  geom_point(data = .%>% tail(3), size = 7, alpha = 0.35, aes(y = pct.change), color = "dodgerblue", fill = "white") +
+  geom_point(data = .%>% tail(1), size = 7, alpha = 0.35, aes(y = pct.change, color = distance), fill = "white") +
+  geom_point(data = .%>% tail(2), size = 7, alpha = 0.35, aes(y = pct.change, color = distance), fill = "white") +
+  geom_point(data = .%>% tail(3), size = 7, alpha = 0.35, aes(y = pct.change, color = distance), fill = "white") +
+  scale_color_manual(values = c("#fb7756", "#facd60", "#1ac0c6")) +
   scale_x_date(date_breaks = "1 years", date_labels = "%Y") +
   scale_y_continuous(#labels = scales::percent,
     breaks = c(100, 150, 200, 250, 300, 350),
