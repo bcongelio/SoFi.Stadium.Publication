@@ -1,86 +1,32 @@
-###
-# using the freddie mac house price index to figure this out
-###
+sofi.short <- sofi.data %>%
+  filter(distance_ord == "Short")
 
-library(tidyverse)
-library(ggfx)
-library(extrafont)
+sales_rtdf <- rtCreateTrans(trans_df = sofi.short,
+                            prop_id = 'ParcelID',
+                            trans_id = 'TransID',
+                            price = 'SalesPrice',
+                            date = 'date',
+                            periodicity = 'monthly')
 
-testing <- fmhpi_master_file %>%
-  filter(GEO_Name == "Denver-Aurora-Lakewood CO") %>%
-  filter(Year >= 2010)
+rt_model <- hpiModel(model_type = 'rt',
+                     hpi_df = sales_rtdf,
+                     estimator = 'base',
+                     log_dep = TRUE)
 
-testing$date <- paste(testing$Year, testing$Month, "01", sep = "-")
+rt_index <- modelToIndex(model_obj = rt_model)
 
-testing$date <- ymd(testing$date)
+index.model <- do.call(cbind.data.frame, rt_index)
+index.model$name <- ym(index.model$name)
+index.model$name <- as.Date(index.model$name, format = "%Y-%m-%d")
 
-testing$date <- as.Date(testing$date, format = "%Y-%m-%d")
 
-testing <- testing %>%
-  mutate(change = Index_NSA / lag(Index_NSA, 12) -1) %>%
-  group_by(date) %>%
-  filter(year(date) > 2010) %>%
-  ungroup()
-
-testing %>%
-  ggplot(aes(x = date, y = change, ymin = 0, ymax = change)) +
-  with_outer_glow(geom_line(colour = "white", size =1.1), colour = "darkorange2", sigma = 8, expand = 2) +
-  geom_point(data = .%>% tail(1), size = 7, alpha = 0.35, aes(y = change), color = "darkorange2", fill = "white") +
+ggplot(data = testing.index, aes(x = date, y = pct.change, label = format(date, "%b-%Y"))) +
+  with_outer_glow(geom_line(colour = "white", size = 1.1, se = FALSE), colour = "dodgerblue", sigma = 5, expand = 4) +
+  geom_point(data = .%>% tail(1), size = 7, alpha = 0.35, aes(y = pct.change), color = "dodgerblue", fill = "white") +
   scale_x_date(date_breaks = "1 years", date_labels = "%Y") +
   scale_y_continuous(#labels = scales::percent,
-                     breaks = c(0, 0.05, 0.1, 0.15, 0.20),
-                     labels = c("0%", "5%", "10%", "15%", "20%"),
-                     limits = c(-0.05, .219)) +
-  theme_minimal() +
-  theme(
-    plot.background = element_rect(fill = "#ffffff", color = NA),
-    panel.background = element_rect(fill = "#ffffff", color = NA),
-    panel.grid.major =  element_line(color = "#d0d0d0"),
-    axis.text.x = element_text(family = "Overpass Medium", size = 15, color = "#000000"),
-    axis.text.y = element_text(family = "Overpass Medium", size = 15, color = "#000000"),
-    axis.title = element_text(family = "Overpass Medium", size = 12, color = "#000000"),
-    panel.border = element_blank()) +
-  xlab("Date (by Year & Month)") +
-  ylab("Percent Change")
-  
-  
-  #####
-  ## now trying to recreate with data from zillow ztrax
-  #####
-  
-  testing <- sofi.data
-
-testing$Date <- format(as.Date(testing$Date, "%Y-%m-%d"), "%Y-%m")
-testing$Date <- ym(testing$Date)
-testing$Date <- as.Date(testing$Date, format = "%Y-%m-%d")
-
-
-testing.data <- testing %>%
-  mutate(month = format(Date, "%m"), year = format(Date, "%Y")) %>%
-  group_by(month, year, distance_ord) %>%
-  mutate(logged.prices = log(SalesPrice)) %>%
-  filter(year(Date) >= 2010)
-
-testing.data <- testing %>%
-  filter(SalesPrice >= 50000 & SalesPrice <= 1000000) %>%
-  group_by(Date, distance_ord) %>%
-  mutate(logged.prices = log(SalesPrice)) %>%
-  filter(year(Date) >= 2010)
-
-testing.data <- na.omit(testing.data)
-
-testing.data <- testing.data %>%
-  mutate(change = logged.prices / lag(logged.prices) -1) %>%
-  group_by(Date, distance_ord)
-
-
-testing.data %>%
-  ggplot(aes(x = Date, y = change, ymin = 0, ymax = change, group = distance_ord)) +
-  with_outer_glow(geom_line(aes(color = distance_ord), size = 1.1), sigma = 8, expand = 2) +
-  scale_x_date(date_breaks = "1 years", date_labels = "%Y") +
-  scale_y_continuous(#labels = scales::percent,
-    breaks = scales::pretty_breaks(n = 9),
-    limits = c(-0.35, .45)) +
+    breaks = c(100, 150, 200, 250, 300, 350),
+    labels = c("10%", "15%", "20%", "25%", "30%", "35%")) +
   theme_minimal() +
   theme(
     plot.background = element_rect(fill = "#ffffff", color = NA),
@@ -93,29 +39,19 @@ testing.data %>%
   xlab("Date (by Year & Month)") +
   ylab("Percent Change")
 
+testing.index <- index.model %>%
+  group_by(name) %>%
+  mutate(pct.change = (value / lag(value) -1) / 100)
 
 
-
-
-  with_outer_glow(geom_line(colour = "white", size =1.1), colour = "darkorange2", sigma = 8, expand = 2) +
-  geom_point(data = .%>% tail(1), size = 7, alpha = 0.35, aes(y = change), color = "darkorange2", fill = "white") +
-  scale_x_date(date_breaks = "1 years", date_labels = "%Y") +
-  scale_y_continuous(#labels = scales::percent,
-    breaks = c(0, 0.05, 0.1, 0.15, 0.20),
-    labels = c("0%", "5%", "10%", "15%", "20%"),
-    limits = c(-0.05, .219)) +
-  theme_minimal() +
-  theme(
-    plot.background = element_rect(fill = "#ffffff", color = NA),
-    panel.background = element_rect(fill = "#ffffff", color = NA),
-    panel.grid.major =  element_line(color = "#d0d0d0"),
-    axis.text.x = element_text(family = "Overpass Medium", size = 15, color = "#000000"),
-    axis.text.y = element_text(family = "Overpass Medium", size = 15, color = "#000000"),
-    axis.title = element_text(family = "Overpass Medium", size = 12, color = "#000000"),
-    panel.border = element_blank()) +
-  xlab("Date (by Year & Month)") +
-  ylab("Percent Change")
-
-
+testing.index <- index.model %>%
+  group_by(year = year(name),
+           month = month(name),
+           monthf = fct_reorder(format(name, "%b"),month(name)),
+           month = as.factor(month(name))) %>%
+  summarize(rate = last(value, na.rm = T),
+            date = last(name, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(pct.change = (rate - lag(rate) / 100))
 
 
