@@ -8,7 +8,24 @@ library(data.table)
 library(mapboxapi)
 library(sf)
 library(geosphere)
-library(tidygeocoder) ##USING ArcGIS GEOCODER
+library(tidycensus)
+library(extrafont)
+library(showtext)
+library(grid)
+library(gridExtra)
+library(geomtextpath)
+library(tidyge)
+library(tidygeocoder)
+library(reprex)
+library(ggbeeswarm)
+library(viridis)
+library(ggstatsplot)
+library(segregation)
+library(tigris)
+
+###ADDING FONT NOW FOR PLOTTING
+font_add_google("Pathway Gothic One", "pathway gothic")
+showtext_auto()
 
 ###SETTING OPTION FOR SCIENTIFIC NOTATION
 options(scipen = 999)
@@ -17,7 +34,10 @@ options(scipen = 999)
 ## PROVIDING API TO CONNECT TO MAPBOX API
 ####################
 
-my_token <- "pk.eyJ1IjoiYmNvbmdlbGlvIiwiYSI6ImNrdDNxZ2w2ODBhYmYydW5xZGg4OWJiNzkifQ.VwsWe9ZNilYhBXd3hA0vlQ"
+census_api_key("1a47c66da9f6c0239edead6eebbf3bceafcf6dca", install = TRUE, overwrite = TRUE) ##FOR TIDYCENSUS
+readRenviron("~/.Renviron")
+
+my_token <- "pk.eyJ1IjoiYmNvbmdlbGlvIiwiYSI6ImNsMDMxeHRyMzAxZHozam55a2pjcjMwNzcifQ.TTGfqoe0h9nOkpjQmowdFw"
 mb_access_token(my_token, install = TRUE, overwrite = TRUE) ##FOR MAPBOX API
 Sys.getenv("MAPBOX_PUBLIC_TOKEN")
 readRenviron("~/.Renviron")
@@ -196,63 +216,728 @@ sofi.merged.buildings <- left_join(sofi.merged.buildings, sofistadium.buildingsA
 sofi.merged.buildings <- na.omit(sofi.merged.buildings)
 
 ###MERGING INTO THE MAIN DATA AGAIN
-sofi.data <- left_join(sofi.data, sofi.merged.buildings, by = c("TransID" = "TransID"))
+sofi.data <- left_join(sofi.data, sofi.merged.buildings, by = c("ParcelID" = "ParcelID"))
 
-sofi.data <- left_join
-
-
-
-####################
-## GETTING READY TO MERGE CENSUS WITH ZTRAX DATA
-####################
-
-###GETTING ALL CENSUS TRACTS IN LOS ANAGLES COUNTY
-la.county.tracts <- tracts("CA", county = "Los Angeles")
-
-###SELECTING JUST THE NEEDED COLUMNS ... LESS RESOURCE INTENSIVE
-la.county.tracts <- la.county.tracts %>%
-  dplyr::select(GEOID, ALAND, AWATER, INTPTLON, INTPTLON, geometry)
-
-###SELECTING JUST THE FIRST 12 DIDGITS OF ZTRAX AND RENAMING IT AS GEOID
-sofi.data$GEOID <- sofi.data$PropertyCensusTract %>%
-  substr(1,12)
-
-###DROPPING THE PERIOD FROM THE NEW GEOID COLUMN
-sofi.data$GEOID <- sub("\\.", "", sofi.data$GEOID)
-
-###MERGING THE TRACTS INFORMATION INTO OUR MAIN SOFI.DATA DF
-sofi.data <- left_join(sofi.data, la.county.tracts, by = c("GEOID" = "GEOID"))
-head(sofi.data)
-
-####################
-## GETTING DRIVING TIME FROM SOFI TO INDIVIDUAL HOUSE ADDRESSES NOW **NOT WORKING NEED GRANT MONEY 
-####################
-
-isochrones <- mb_isochrone("SoFi Stadium, Inglewood CA",
-                           profile = "driving",
-                           time = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15))
-
-mapdeck(style = mapdeck_style("street")) %>%
-  add_polygon(data = isochrones,
-              fill_colour = "time",
-              fill_opacity = 0.1,
-              legend = TRUE)
-
-head(sofi.data)
+###CHECKING AGAIN FOR NA DATA
+sofi.data <- na.omit(sofi.data)
 
 
-sofistadium.propertyinfo <- sofistadium.propertyinfo %>%
+
+######################
+### GEOCODING DISTANCE FROM SOFI
+######################
+sofi.data <- sofi.data %>%
   mutate(sofilat = 33.95356,
          sofilog = -118.33859)
 
 meter2mile <- 0.000621371
 
-sofistadium.propertyinfo[, distance := meter2mile * geosphere::distVincentyEllipsoid(
+sofi.data[, distance := meter2mile * geosphere::distVincentyEllipsoid(
   cbind(PropertyLongitude, PropertyLatitude),
   cbind(sofilog, sofilat)) ]
-sofistadium.propertyinfo
+sofi.data
 
-head(sofistadium.propertyinfo)
+##DROPPING THOSE OUTSIDE OF 10 MILES
+sofi.data <- sofi.data %>%
+  filter(distance <= 20)
+
+##SEPERATING DATE COLUMN INTO INDIVIDUAL TO CORRECTLY SET YEAR ORDINANCE FOR REGRESSION MODEL
+sofi.data <- separate(sofi.data, Date, c("Year", "Month", "Day"), sep = "-")
+
+##DROPPING MONTH AND DAY BECAUSE WE NO LONGER NEED THEM
+sofi.data$Month <- NULL
+sofi.data$Day <- NULL
+
+##CREATING YEAR ORDINANCE FOR DID REGRESSION MODEL
+sofi.data$year_ord <- as.numeric(sofi.data$Year >= 2016)
+
+##CREATING DISTANCE ORDINANCE FOR DID REGRESSION MODEL
+sofi.data <- sofi.data %>%
+  mutate(distance_ord = factor(
+    case_when(
+      distance <= 5 ~ "Short",
+      distance >= 5.000001 & distance <= 10 ~ "Moderate",
+      distance >= 10.000001 & distance <= 15 ~ "Long",
+      distance >= 15.000001 & distance <= 20 ~ "Very Long")))
+
+
+
+
+
+
+########################################################################################################
+## 
+##
+####
+## ALLEGIANT STADIUM ALLEGIANT STADIUM ALLEGIANT STADIUM ALLEGIANT STADIUM ALLEGIANT STADIUM ALLEGIANT STADIUM
+####
+##
+########################################################################################################
+
+dir <- "D:\\ZTRAX\\Research\\AllegiantStadium"  ###Switching to Correct Directory
+
+###CALLING IN LAYOUT STYLESHEET
+layoutZAsmt <- read_excel(file.path(dir, 'layout.xlsx'), sheet = 1)
+layoutZTrans <- read_excel(file.path(dir, 'layout.xlsx'), 
+                           sheet = 2,
+                           col_types = c("text", "text", "numeric", "text", "text"))
+
+
+######################
+### PropertyInfo.txt ###
+######################
+
+###CREATING DATA.TABLE OF utPropertyInfo.TXT Stylesheet
+col_namesPropertyInfo <- layoutZTrans[layoutZTrans$TableName == 'utPropertyInfo', 'FieldName']
+
+
+###PIVOTING STYLESHEETS TO WIDE FORMAT
+col_namesPropertyInfo <- col_namesPropertyInfo %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+###GATHERING SOFI STADIUM INFORMATION
+allegiant.propertyinfo <- fread(file.path(dir, "\\ZTrans\\PropertyInfo.txt"),
+                                  select = c(1, 16, 17, 53, 54, 55, 63, 65),
+                                  sep = '|',
+                                  header = FALSE,
+                                  stringsAsFactors = FALSE,       
+                                  quote = "")
+
+##RENAMING THE COLUMNS
+allegiant.propertyinfo <- allegiant.propertyinfo %>%
+  dplyr::rename(
+    TransID = V1,
+    PropertyAddress = V16,
+    PropertyCity = V17,
+    PropertyLatitude = V53,
+    PropertyLongitude = V54,
+    PropertyCensusTract = V55,
+    PropertyCounty = V63,
+    ParcelID = V65
+  )
+
+
+######################
+### Main.txt ### this gets the sales prices & date
+######################
+
+
+###CREATING DATA.TABLE OF utMain.TXT Stylesheet
+col_namesMain <- layoutZTrans[layoutZTrans$TableName == 'utMain', 'FieldName']
+
+col_namesMain <- col_namesMain %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+allegiant.main <- fread(file.path(dir, "\\ZTrans\\Main.txt"),
+                          select = c(1,18,25),
+                          sep = '|',
+                          header = FALSE,
+                          stringsAsFactors = FALSE,       
+                          quote = "")
+
+allegiant.main <- allegiant.main %>%
+  dplyr::rename(
+    TransID = V1,
+    Date = V18,
+    SalesPrice = V25
+  )
+
+###DROPPING ANY ROWS THAT INCLUDE MISSING INFORMATION
+allegiant.main <- na.omit(allegiant.main)
+
+###MERGING PROPERTYINFO WITH MAIN INFO & AGAIN CHECKING FOR MISSING INFORMATION
+allegiant.data <- left_join(allegiant.propertyinfo, allegiant.main, by = c("TransID" = "TransID"))
+allegiant.data <- na.omit(allegiant.data)
+
+###FILTERING DOWN TO JUST LOS ANGELES COUNTY
+allegiant.data <- allegiant.data %>%
+  filter(PropertyCounty == 32003)
+
+
+######################
+### NOTE: SWITCHING TO ASSESSMENT HERE
+### main.txt ### getting information re. each house
+######################
+
+col_namesAsmtMain <- layoutZAsmt[layoutZAsmt$TableName == 'utMain', 'FieldName']
+
+col_namesAsmtMain <- col_namesAsmtMain %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+allegiant.asmtmain <- fread(file.path(dir, "\\ZAsmt\\Main.txt"),
+                              select = c(1, 2),
+                              sep = '|',
+                              header = FALSE,
+                              stringsAsFactors = FALSE,       
+                              quote = "")
+
+##RENAMING THE COLUMNS
+allegiant.asmtmain <- allegiant.asmtmain %>%
+  dplyr::rename(
+    TransID = V1,
+    ParcelID = V2
+  )
+
+
+######################
+### NOTE: SWITCHING TO ASSESSMENT HERE
+### building.txt ### getting information re. each house
+######################
+
+###CREATING DATA.TABLE OF utBuilding.TXT Stylesheet
+col_namesBuilding <- layoutZAsmt[layoutZAsmt$TableName == 'utBuilding', 'FieldName']
+
+col_namesBuilding <- col_namesBuilding %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+allegiant.buildings <- fread(file.path(dir, "\\ZAsmt\\Building.txt"),
+                               select = c(1, 13, 15, 20, 26),
+                               sep = '|',
+                               header = FALSE,
+                               stringsAsFactors = FALSE,       
+                               quote = "")
+
+allegiant.buildings <- allegiant.buildings %>%
+  dplyr::rename(
+    TransID = V1,
+    BuildingQuality = V13,
+    YearBuilt = V15,
+    TotalBedrooms = V20,
+    CalculatedBath = V26
+  )
+
+##CREAING A COLUMN TO CALCULATE BUILDING AGE
+allegiant.buildings$age <- 2022 - allegiant.buildings$YearBuilt
+
+
+######################
+### NOTE: SWITCHING TO ASSESSMENT HERE
+### BuildingArea.txt ### getting SQFT
+######################
+
+###CREATING DATA.TABLE OF utBuilding.TXT Stylesheet
+col_namesBuildingAreas <- layoutZAsmt[layoutZAsmt$TableName == 'utBuildingAreas', 'FieldName']
+
+col_namesBuildingAreas <- col_namesBuildingAreas %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+allegiant.buildingsAreas <- fread(file.path(dir, "\\ZAsmt\\BuildingAreas.txt"),
+                                    select = c(1, 5),
+                                    sep = '|',
+                                    header = FALSE,
+                                    stringsAsFactors = FALSE,       
+                                    quote = "")
+
+allegiant.buildingsAreas <- allegiant.buildingsAreas %>%
+  dplyr::rename(
+    TransID = V1,
+    SqFeet = V5
+  )
+
+###MERGING BUILDING INFORMATION TOGETHER AND DROPPING ROWS WITH MISSING INFORMATION
+allegiant.merged.buildings <- left_join(allegiant.asmtmain, allegiant.buildings,
+                                   by = c("TransID" = "TransID"))
+
+allegiant.merged.buildings <- left_join(allegiant.merged.buildings, allegiant.buildingsAreas,
+                                   by = c("TransID" = "TransID"))
+
+allegiant.merged.buildings <- na.omit(allegiant.merged.buildings)
+
+###MERGING INTO THE MAIN DATA AGAIN
+allegiant.data <- left_join(allegiant.data, allegiant.merged.buildings, by = c("ParcelID" = "ParcelID"))
+
+###CHECKING AGAIN FOR NA DATA
+allegiant.data <- na.omit(allegiant.data)
+
+
+
+######################
+### GEOCODING DISTANCE
+######################
+allegiant.data <- allegiant.data %>%
+  mutate(sofilat = 36.09101,
+         sofilog = -115.18319)
+
+meter2mile <- 0.000621371
+
+allegiant.data[, distance := meter2mile * geosphere::distVincentyEllipsoid(
+  cbind(PropertyLongitude, PropertyLatitude),
+  cbind(sofilog, sofilat)) ]
+allegiant.data
+
+##DROPPING THOSE OUTSIDE OF 10 MILES
+allegiant.data <- allegiant.data %>%
+  filter(distance <= 20)
+
+##SEPERATING DATE COLUMN INTO INDIVIDUAL TO CORRECTLY SET YEAR ORDINANCE FOR REGRESSION MODEL
+allegiant.data <- separate(allegiant.data, Date, c("Year", "Month", "Day"), sep = "-")
+
+##DROPPING MONTH AND DAY BECAUSE WE NO LONGER NEED THEM
+allegiant.data$Month <- NULL
+allegiant.data$Day <- NULL
+
+##CREATING YEAR ORDINANCE FOR DID REGRESSION MODEL
+allegiant.data$year_ord <- as.numeric(allegiant.data$Year >= 2017)
+
+##CREATING DISTANCE ORDINANCE FOR DID REGRESSION MODEL
+allegiant.data <- allegiant.data %>%
+  mutate(distance_ord = factor(
+    case_when(
+      distance <= 5 ~ "Short",
+      distance >= 5.000001 & distance <= 10 ~ "Moderate",
+      distance >= 10.000001 & distance <= 15 ~ "Long",
+      distance >= 15.000001 & distance <= 20 ~ "Very Long")))
+
+
+
+
+
+########################################################################################################
+## 
+##
+####
+## MERCEDES-BENZ STADIUM   MERCEDES-BENZ STADIUM   MERCEDES-BENZ STADIUM   MERCEDES-BENZ STADIUM
+####
+##
+########################################################################################################
+
+dir <- "D:\\ZTRAX\\Research\\MercedesStadium"  ###Switching to Correct Directory
+
+###CALLING IN LAYOUT STYLESHEET
+layoutZAsmt <- read_excel(file.path(dir, 'layout.xlsx'), sheet = 1)
+layoutZTrans <- read_excel(file.path(dir, 'layout.xlsx'), 
+                           sheet = 2,
+                           col_types = c("text", "text", "numeric", "text", "text"))
+
+
+######################
+### PropertyInfo.txt ###
+######################
+
+###CREATING DATA.TABLE OF utPropertyInfo.TXT Stylesheet
+col_namesPropertyInfo <- layoutZTrans[layoutZTrans$TableName == 'utPropertyInfo', 'FieldName']
+
+
+###PIVOTING STYLESHEETS TO WIDE FORMAT
+col_namesPropertyInfo <- col_namesPropertyInfo %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+###GATHERING SOFI STADIUM INFORMATION
+mercedes.propertyinfo <- fread(file.path(dir, "\\ZTrans\\PropertyInfo.txt"),
+                               select = c(1, 16, 17, 53, 54, 55, 63, 65),
+                               sep = '|',
+                               header = FALSE,
+                               stringsAsFactors = FALSE,       
+                               quote = "")
+
+##RENAMING THE COLUMNS
+mercedes.propertyinfo <- mercedes.propertyinfo %>%
+  dplyr::rename(
+    TransID = V1,
+    PropertyAddress = V16,
+    PropertyCity = V17,
+    PropertyLatitude = V53,
+    PropertyLongitude = V54,
+    PropertyCensusTract = V55,
+    PropertyCounty = V63,
+    ParcelID = V65
+  )
+
+
+######################
+### Main.txt ### this gets the sales prices & date
+######################
+
+
+###CREATING DATA.TABLE OF utMain.TXT Stylesheet
+col_namesMain <- layoutZTrans[layoutZTrans$TableName == 'utMain', 'FieldName']
+
+col_namesMain <- col_namesMain %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+mercedes.main <- fread(file.path(dir, "\\ZTrans\\Main.txt"),
+                       select = c(1,18,25),
+                       sep = '|',
+                       header = FALSE,
+                       stringsAsFactors = FALSE,       
+                       quote = "")
+
+mercedes.main <- mercedes.main %>%
+  dplyr::rename(
+    TransID = V1,
+    Date = V18,
+    SalesPrice = V25
+  )
+
+###DROPPING ANY ROWS THAT INCLUDE MISSING INFORMATION
+mercedes.main <- na.omit(mercedes.main)
+
+###MERGING PROPERTYINFO WITH MAIN INFO & AGAIN CHECKING FOR MISSING INFORMATION
+mercedes.data <- left_join(mercedes.propertyinfo, mercedes.main, by = c("TransID" = "TransID"))
+mercedes.data <- na.omit(mercedes.data)
+
+###FILTERING DOWN TO JUST LOS ANGELES COUNTY
+mercedes.data <- mercedes.data %>%
+  filter(PropertyCounty == 13121)
+
+
+######################
+### NOTE: SWITCHING TO ASSESSMENT HERE
+### main.txt ### getting information re. each house
+######################
+
+col_namesAsmtMain <- layoutZAsmt[layoutZAsmt$TableName == 'utMain', 'FieldName']
+
+col_namesAsmtMain <- col_namesAsmtMain %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+mercedes.asmtmain <- fread(file.path(dir, "\\ZAsmt\\Main.txt"),
+                           select = c(1, 2),
+                           sep = '|',
+                           header = FALSE,
+                           stringsAsFactors = FALSE,       
+                           quote = "")
+
+##RENAMING THE COLUMNS
+mercedes.asmtmain <- mercedes.asmtmain %>%
+  dplyr::rename(
+    TransID = V1,
+    ParcelID = V2
+  )
+
+
+######################
+### NOTE: SWITCHING TO ASSESSMENT HERE
+### building.txt ### getting information re. each house
+######################
+
+###CREATING DATA.TABLE OF utBuilding.TXT Stylesheet
+col_namesBuilding <- layoutZAsmt[layoutZAsmt$TableName == 'utBuilding', 'FieldName']
+
+col_namesBuilding <- col_namesBuilding %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+mercedes.buildings <- fread(file.path(dir, "\\ZAsmt\\Building.txt"),
+                            select = c(1, 13, 15, 20, 26),
+                            sep = '|',
+                            header = FALSE,
+                            stringsAsFactors = FALSE,       
+                            quote = "")
+
+mercedes.buildings <- mercedes.buildings %>%
+  dplyr::rename(
+    TransID = V1,
+    BuildingQuality = V13,
+    YearBuilt = V15,
+    TotalBedrooms = V20,
+    CalculatedBath = V26
+  )
+
+##CREAING A COLUMN TO CALCULATE BUILDING AGE
+mercedes.buildings$age <- 2022 - mercedes.buildings$YearBuilt
+
+
+######################
+### NOTE: SWITCHING TO ASSESSMENT HERE
+### BuildingArea.txt ### getting SQFT
+######################
+
+###CREATING DATA.TABLE OF utBuilding.TXT Stylesheet
+col_namesBuildingAreas <- layoutZAsmt[layoutZAsmt$TableName == 'utBuildingAreas', 'FieldName']
+
+col_namesBuildingAreas <- col_namesBuildingAreas %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+mercedes.buildingsAreas <- fread(file.path(dir, "\\ZAsmt\\BuildingAreas.txt"),
+                                 select = c(1, 5),
+                                 sep = '|',
+                                 header = FALSE,
+                                 stringsAsFactors = FALSE,       
+                                 quote = "")
+
+mercedes.buildingsAreas <- mercedes.buildingsAreas %>%
+  dplyr::rename(
+    TransID = V1,
+    SqFeet = V5
+  )
+
+###MERGING BUILDING INFORMATION TOGETHER AND DROPPING ROWS WITH MISSING INFORMATION
+mercedes.merged.buildings <- left_join(mercedes.asmtmain, mercedes.buildings,
+                                       by = c("TransID" = "TransID"))
+
+mercedes.merged.buildings <- left_join(mercedes.merged.buildings, mercedes.buildingsAreas,
+                                       by = c("TransID" = "TransID"))
+
+mercedes.merged.buildings <- na.omit(mercedes.merged.buildings)
+
+###MERGING INTO THE MAIN DATA AGAIN
+mercedes.data <- left_join(mercedes.data, mercedes.merged.buildings, by = c("ParcelID" = "ParcelID"))
+
+###CHECKING AGAIN FOR NA DATA
+mercedes.data <- na.omit(mercedes.data)
+
+
+
+######################
+### GEOCODING DISTANCE
+######################
+mercedes.data <- mercedes.data %>%
+  mutate(sofilat = 33.75541,
+         sofilog = -84.40106)
+
+meter2mile <- 0.000621371
+
+mercedes.data[, distance := meter2mile * geosphere::distVincentyEllipsoid(
+  cbind(PropertyLongitude, PropertyLatitude),
+  cbind(sofilog, sofilat)) ]
+mercedes.data
+
+##DROPPING THOSE OUTSIDE OF 10 MILES
+mercedes.data <- mercedes.data %>%
+  filter(distance <= 20)
+
+##SEPERATING DATE COLUMN INTO INDIVIDUAL TO CORRECTLY SET YEAR ORDINANCE FOR REGRESSION MODEL
+mercedes.data <- separate(mercedes.data, Date, c("Year", "Month", "Day"), sep = "-")
+
+##DROPPING MONTH AND DAY BECAUSE WE NO LONGER NEED THEM
+mercedes.data$Month <- NULL
+mercedes.data$Day <- NULL
+
+##CREATING YEAR ORDINANCE FOR DID REGRESSION MODEL
+mercedes.data$year_ord <- as.numeric(mercedes.data$Year >= 2014)
+
+##CREATING DISTANCE ORDINANCE FOR DID REGRESSION MODEL
+mercedes.data <- mercedes.data %>%
+  mutate(distance_ord = factor(
+    case_when(
+      distance <= 5 ~ "Short",
+      distance >= 5.000001 & distance <= 10 ~ "Moderate",
+      distance >= 10.000001 & distance <= 15 ~ "Long",
+      distance >= 15.000001 & distance <= 20 ~ "Very Long")))
+
+
+########################################################################################################
+## 
+##
+####
+## US BANK STADIUM  US BANK STADIUM  US BANK STADIUM  US BANK STADIUM  US BANK STADIUM  US BANK STADIUM
+####
+##
+########################################################################################################
+
+dir <- "D:\\ZTRAX\\Research\\USBankStadium"  ###Switching to Correct Directory
+
+###CALLING IN LAYOUT STYLESHEET
+layoutZAsmt <- read_excel(file.path(dir, 'layout.xlsx'), sheet = 1)
+layoutZTrans <- read_excel(file.path(dir, 'layout.xlsx'), 
+                           sheet = 2,
+                           col_types = c("text", "text", "numeric", "text", "text"))
+
+
+######################
+### PropertyInfo.txt ###
+######################
+
+###CREATING DATA.TABLE OF utPropertyInfo.TXT Stylesheet
+col_namesPropertyInfo <- layoutZTrans[layoutZTrans$TableName == 'utPropertyInfo', 'FieldName']
+
+
+###PIVOTING STYLESHEETS TO WIDE FORMAT
+col_namesPropertyInfo <- col_namesPropertyInfo %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+###GATHERING SOFI STADIUM INFORMATION
+usbank.propertyinfo <- fread(file.path(dir, "\\ZTrans\\PropertyInfo.txt"),
+                             select = c(1, 16, 17, 53, 54, 55, 63, 65),
+                             sep = '|',
+                             header = FALSE,
+                             stringsAsFactors = FALSE,       
+                             quote = "")
+
+##RENAMING THE COLUMNS
+usbank.propertyinfo <- usbank.propertyinfo %>%
+  dplyr::rename(
+    TransID = V1,
+    PropertyAddress = V16,
+    PropertyCity = V17,
+    PropertyLatitude = V53,
+    PropertyLongitude = V54,
+    PropertyCensusTract = V55,
+    PropertyCounty = V63,
+    ParcelID = V65
+  )
+
+
+######################
+### Main.txt ### this gets the sales prices & date
+######################
+
+
+###CREATING DATA.TABLE OF utMain.TXT Stylesheet
+col_namesMain <- layoutZTrans[layoutZTrans$TableName == 'utMain', 'FieldName']
+
+col_namesMain <- col_namesMain %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+usbank.main <- fread(file.path(dir, "\\ZTrans\\Main.txt"),
+                     select = c(1,18,25),
+                     sep = '|',
+                     header = FALSE,
+                     stringsAsFactors = FALSE,       
+                     quote = "")
+
+usbank.main <- usbank.main %>%
+  dplyr::rename(
+    TransID = V1,
+    Date = V18,
+    SalesPrice = V25
+  )
+
+###DROPPING ANY ROWS THAT INCLUDE MISSING INFORMATION
+usbank.main <- na.omit(usbank.main)
+
+###MERGING PROPERTYINFO WITH MAIN INFO & AGAIN CHECKING FOR MISSING INFORMATION
+usbank.data <- left_join(usbank.propertyinfo, usbank.main, by = c("TransID" = "TransID"))
+usbank.data <- na.omit(usbank.data)
+
+###FILTERING DOWN TO JUST LOS ANGELES COUNTY
+usbank.data <- usbank.data %>%
+  filter(PropertyCounty == 27053)
+
+
+######################
+### NOTE: SWITCHING TO ASSESSMENT HERE
+### main.txt ### getting information re. each house
+######################
+
+col_namesAsmtMain <- layoutZAsmt[layoutZAsmt$TableName == 'utMain', 'FieldName']
+
+col_namesAsmtMain <- col_namesAsmtMain %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+usbank.asmtmain <- fread(file.path(dir, "\\ZAsmt\\Main.txt"),
+                         select = c(1, 2),
+                         sep = '|',
+                         header = FALSE,
+                         stringsAsFactors = FALSE,       
+                         quote = "")
+
+##RENAMING THE COLUMNS
+usbank.asmtmain <- usbank.asmtmain %>%
+  dplyr::rename(
+    TransID = V1,
+    ParcelID = V2
+  )
+
+
+######################
+### NOTE: SWITCHING TO ASSESSMENT HERE
+### building.txt ### getting information re. each house
+######################
+
+###CREATING DATA.TABLE OF utBuilding.TXT Stylesheet
+col_namesBuilding <- layoutZAsmt[layoutZAsmt$TableName == 'utBuilding', 'FieldName']
+
+col_namesBuilding <- col_namesBuilding %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+usbank.buildings <- fread(file.path(dir, "\\ZAsmt\\Building.txt"),
+                          select = c(1, 13, 15, 20, 26),
+                          sep = '|',
+                          header = FALSE,
+                          stringsAsFactors = FALSE,       
+                          quote = "")
+
+usbank.buildings <- usbank.buildings %>%
+  dplyr::rename(
+    TransID = V1,
+    BuildingQuality = V13,
+    YearBuilt = V15,
+    TotalBedrooms = V20,
+    CalculatedBath = V26
+  )
+
+##CREAING A COLUMN TO CALCULATE BUILDING AGE
+usbank.buildings$age <- 2022 - usbank.buildings$YearBuilt
+
+
+######################
+### NOTE: SWITCHING TO ASSESSMENT HERE
+### BuildingArea.txt ### getting SQFT
+######################
+
+###CREATING DATA.TABLE OF utBuilding.TXT Stylesheet
+col_namesBuildingAreas <- layoutZAsmt[layoutZAsmt$TableName == 'utBuildingAreas', 'FieldName']
+
+col_namesBuildingAreas <- col_namesBuildingAreas %>%
+  pivot_wider(names_from = FieldName, values_from = FieldName)
+
+usbank.buildingsAreas <- fread(file.path(dir, "\\ZAsmt\\BuildingAreas.txt"),
+                               select = c(1, 5),
+                               sep = '|',
+                               header = FALSE,
+                               stringsAsFactors = FALSE,       
+                               quote = "")
+
+usbank.buildingsAreas <- usbank.buildingsAreas %>%
+  dplyr::rename(
+    TransID = V1,
+    SqFeet = V5
+  )
+
+###MERGING BUILDING INFORMATION TOGETHER AND DROPPING ROWS WITH MISSING INFORMATION
+usbank.merged.buildings <- left_join(usbank.asmtmain, usbank.buildings,
+                                     by = c("TransID" = "TransID"))
+
+usbank.merged.buildings <- left_join(usbank.merged.buildings, usbank.buildingsAreas,
+                                     by = c("TransID" = "TransID"))
+
+usbank.merged.buildings <- na.omit(usbank.merged.buildings)
+
+###MERGING INTO THE MAIN DATA AGAIN
+usbank.data <- left_join(usbank.data, usbank.merged.buildings, by = c("ParcelID" = "ParcelID"))
+
+###CHECKING AGAIN FOR NA DATA
+usbank.data <- na.omit(usbank.data)
+
+
+
+######################
+### GEOCODING DISTANCE
+######################
+usbank.data <- usbank.data %>%
+  mutate(sofilat = 44.97378,
+         sofilog = -93.25770)
+
+meter2mile <- 0.000621371
+
+usbank.data[, distance := meter2mile * geosphere::distVincentyEllipsoid(
+  cbind(PropertyLongitude, PropertyLatitude),
+  cbind(sofilog, sofilat)) ]
+usbank.data
+
+##DROPPING THOSE OUTSIDE OF 10 MILES
+usbank.data <- usbank.data %>%
+  filter(distance <= 20)
+
+##SEPERATING DATE COLUMN INTO INDIVIDUAL TO CORRECTLY SET YEAR ORDINANCE FOR REGRESSION MODEL
+usbank.data <- separate(usbank.data, Date, c("Year", "Month", "Day"), sep = "-")
+
+##DROPPING MONTH AND DAY BECAUSE WE NO LONGER NEED THEM
+usbank.data$Month <- NULL
+usbank.data$Day <- NULL
+
+##CREATING YEAR ORDINANCE FOR DID REGRESSION MODEL
+usbank.data$year_ord <- as.numeric(usbank.data$Year >= 2013)
+
+##CREATING DISTANCE ORDINANCE FOR DID REGRESSION MODEL
+usbank.data <- usbank.data %>%
+  mutate(distance_ord = factor(
+    case_when(
+      distance <= 5 ~ "Short",
+      distance >= 5.000001 & distance <= 10 ~ "Moderate",
+      distance >= 10.000001 & distance <= 15 ~ "Long",
+      distance >= 15.000001 & distance <= 20 ~ "Very Long")))
 
 
 
@@ -261,24 +946,19 @@ head(sofistadium.propertyinfo)
 ##HOME PRICES DID CODING
 #################
 
-sofi.data <- sofi.data %>%
-  filter(SalesPrice >= 1000 & SalesPrice <= 1000000) %>%
-  filter(distance <= 20)
+sofi.model <- lm(SalesPrice ~ relevel(distance_ord, ref = "Short") * year_ord + age + TotalBedrooms +
+                   CalculatedBath + SqFeet, data = sofi.data)
 
-sofi.cleaned$post16 = as.numeric(sofi.cleaned$year >= 2016)
+usbank.model <- lm(SalesPrice ~ relevel(distance_ord, ref = "Short") * year_ord + age + TotalBedrooms +
+                   CalculatedBath + SqFeet, data = usbank.data)
 
-sofi.cleaned <- sofi.cleaned %>%
-  mutate(distance_ord = factor(
-    case_when(
-      distance <= 5 ~ "Short",
-      distance >= 5.000001 & distance <= 10  ~ "Moderate",
-      distance >= 10.00001 & distance <= 20 ~ "Long")))
+allegiant.model <- lm(SalesPrice ~ relevel(distance_ord, ref = "Short") * year_ord + age + TotalBedrooms +
+                   CalculatedBath + SqFeet, data = allegiant.data)
 
-model <- lm(SalesPrice ~ relevel(distance_ord, ref = "Short") * post16 + age + TotalBedrooms + 
-              TotalCalculatedBath + SqFt, data = sofi.cleaned)
+mercedes.model <- lm(SalesPrice ~ relevel(distance_ord, ref = "Short") * year_ord + age + TotalBedrooms +
+                   CalculatedBath + SqFeet, data = mercedes.data)
 
-summary(model)
-
+summary(mercedes.model)
 
 #################
 ##MEANS CENTERING THE REGRESSION MODEL ... STILL DECIDING ON THIS
@@ -288,22 +968,1367 @@ v.center <- c("TotalBedrooms", "SqFt", "age", "TotalCalculatedBath")
 
 meanCenter(model, centerOnlyInteractors = TRUE, centerDV = FALSE,
            standardize = TRUE, terms = v.center)
-           
-           
+
+
+
+
 #################
-PROCESS TO GEOCODE ZTRAX ADDRESSES
+##TIDYCENSUS MATERIAL FOR INCOME-TO-RENT RATIO
 #################
 
-addresses <- geocode(addresses,
-                      address = address,
-                      method = "arcgis",
-                      full_results = TRUE)
-                      
-                      
+variables <- load_variables(2014, "acs1", cache = TRUE)
 
-##################
-CONVERTING SOFI COORDINATES INTO AN SF OBJECT
-##################  
+rent.and.income <- c(
+  mean.rent = "B25064_001",
+  mean.income = "B19113_001"
+)
 
-st_as_sf(coords = c("long", "lat"),
-         crs = st_crs("EPSG:4326"))
+##INGLEWOOD 2014 RENT
+inglewood.rent.2014 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "CA",
+  county = "Los Angeles",
+  geometry = TRUE,
+  output = "wide",
+  year = 2014
+)
+
+inglewood.rent.2014 <- inglewood.rent.2014 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+inglewood.rent.2014 <- na.omit(inglewood.rent.2014)
+
+sofi_stadium <- mb_geocode("SoFi Stadium, Los Angeles CA")
+minutes_to_sofi <- mb_matrix(inglewood.rent.2014, sofi_stadium)
+
+inglewood.rent.2014$minutes <- as.numeric(minutes_to_sofi)
+
+inglewood.rent.2014 <- inglewood.rent.2014 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+inglewood.rent.2014$year <- 2014
+
+
+##INGLEWOOD 2015 RENT
+inglewood.rent.2015 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "CA",
+  county = "Los Angeles",
+  geometry = TRUE,
+  output = "wide",
+  year = 2015
+)
+
+inglewood.rent.2015 <- inglewood.rent.2015 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+inglewood.rent.2015 <- na.omit(inglewood.rent.2015)
+
+sofi_stadium <- mb_geocode("SoFi Stadium, Los Angeles CA")
+minutes_to_sofi <- mb_matrix(inglewood.rent.2015, sofi_stadium)
+
+inglewood.rent.2015$minutes <- as.numeric(minutes_to_sofi)
+
+inglewood.rent.2015 <- inglewood.rent.2015 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+inglewood.rent.2015$year <- 2015
+
+
+##INGLEWOOD 2016 RENT
+inglewood.rent.2016 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "CA",
+  county = "Los Angeles",
+  geometry = TRUE,
+  output = "wide",
+  year = 2016
+)
+
+inglewood.rent.2016 <- inglewood.rent.2016 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+inglewood.rent.2016 <- na.omit(inglewood.rent.2016)
+
+minutes_to_sofi <- mb_matrix(inglewood.rent.2016, sofi_stadium)
+
+inglewood.rent.2016$minutes <- as.numeric(minutes_to_sofi)
+
+inglewood.rent.2016 <- inglewood.rent.2016 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+inglewood.rent.2016$year <- 2016
+
+
+##INGLEWOOD 2017 RENT
+inglewood.rent.2017 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "CA",
+  county = "Los Angeles",
+  geometry = TRUE,
+  output = "wide",
+  year = 2017
+)
+
+inglewood.rent.2017 <- inglewood.rent.2017 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+inglewood.rent.2017 <- na.omit(inglewood.rent.2017)
+
+minutes_to_sofi <- mb_matrix(inglewood.rent.2017, sofi_stadium)
+
+inglewood.rent.2017$minutes <- as.numeric(minutes_to_sofi)
+
+inglewood.rent.2017 <- inglewood.rent.2017 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+inglewood.rent.2017$year <- 2017
+
+
+##INGLEWOOD 2018 RENT
+inglewood.rent.2018 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "CA",
+  county = "Los Angeles",
+  geometry = TRUE,
+  output = "wide",
+  year = 2018
+)
+
+inglewood.rent.2018 <- inglewood.rent.2018 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+inglewood.rent.2018 <- na.omit(inglewood.rent.2018)
+
+minutes_to_sofi <- mb_matrix(inglewood.rent.2018, sofi_stadium)
+
+inglewood.rent.2018$minutes <- as.numeric(minutes_to_sofi)
+
+inglewood.rent.2018 <- inglewood.rent.2018 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+inglewood.rent.2018$year <- 2018
+
+
+##INGLEWOOD 2019 RENT
+inglewood.rent.2019 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "CA",
+  county = "Los Angeles",
+  geometry = TRUE,
+  output = "wide",
+  year = 2019
+)
+
+inglewood.rent.2019 <- inglewood.rent.2019 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+inglewood.rent.2019 <- na.omit(inglewood.rent.2019)
+
+minutes_to_sofi <- mb_matrix(inglewood.rent.2019, sofi_stadium)
+
+inglewood.rent.2019$minutes <- as.numeric(minutes_to_sofi)
+
+inglewood.rent.2019 <- inglewood.rent.2019 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+inglewood.rent.2019$year <- 2019
+
+
+###binding everything together for inglewood
+inglewood.rent <- rbind(inglewood.rent.2014, inglewood.rent.2015, inglewood.rent.2016, inglewood.rent.2017,
+                        inglewood.rent.2018, inglewood.rent.2019)
+
+inglewood.rent <- inglewood.rent %>%
+  filter(rent.to.income <= .50)
+
+ggplot(data = inglewood.rent, aes(x = minutes, y = rent.to.income)) +
+  geom_point(alpha = .40) +
+  geom_smooth(se = FALSE) +
+  theme_minimal() +
+  facet_grid(.~year) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 8)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  theme_bw() +
+  theme(panel.background=element_rect(fill="#FFFFFF")) +
+  theme(plot.background=element_rect(fill="#FFFFFF")) +
+  theme(panel.border=element_rect(colour="#FFFFFF")) +
+  theme(panel.grid.major=element_line(colour="#F3F3F3",size=.75)) +
+  theme(panel.grid.minor = element_blank()) +
+  theme(axis.ticks = element_blank()) +
+  theme(axis.text.x=element_text(size=8,colour="#000000",face="bold")) +
+  theme(axis.text.y=element_text(size=8,colour="#000000",face="bold")) +
+  theme(axis.title.y=element_text(size=11,colour="#000000",face="bold",vjust=1.5)) +
+  theme(axis.title.x=element_text(size=11,colour="#000000",face="bold",vjust=-.5)) +
+  theme(plot.title=element_text(face="bold", colour="#000000",size=15)) +
+  xlab("Minutes from SoFi Stadium") +
+  ylab("Income to Rent Ratio") +
+  labs(title = "Rent to Income Ratio: Inglewood, California",
+       subtitle = "IRS Considers 30% a 'Stressed' Household")
+
+
+
+
+
+
+
+##paradise 2014 RENT
+paradise.rent.2014 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "NV",
+  county = "Clark",
+  geometry = TRUE,
+  output = "wide",
+  year = 2014
+)
+
+paradise.rent.2014 <- paradise.rent.2014 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+paradise.rent.2014 <- na.omit(paradise.rent.2014)
+
+allegiant_stadium <- mb_geocode("Allegiant Stadium, Paradise NV")
+minutes_to_allegiant <- mb_matrix(paradise.rent.2014, allegiant_stadium)
+
+paradise.rent.2014$minutes <- as.numeric(minutes_to_allegiant)
+
+paradise.rent.2014 <- paradise.rent.2014 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+paradise.rent.2014$year <- 2014
+
+
+
+
+##paradise 2015 RENT
+paradise.rent.2015 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "NV",
+  county = "Clark",
+  geometry = TRUE,
+  output = "wide",
+  year = 2015
+)
+
+paradise.rent.2015 <- paradise.rent.2015 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+paradise.rent.2015 <- na.omit(paradise.rent.2015)
+
+allegiant_stadium <- mb_geocode("Allegiant Stadium, Paradise NV")
+minutes_to_allegiant <- mb_matrix(paradise.rent.2015, allegiant_stadium)
+
+paradise.rent.2015$minutes <- as.numeric(minutes_to_allegiant)
+
+paradise.rent.2015 <- paradise.rent.2015 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+paradise.rent.2015$year <- 2015
+
+
+
+##paradise 2016 RENT
+paradise.rent.2016 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "NV",
+  county = "Clark",
+  geometry = TRUE,
+  output = "wide",
+  year = 2016
+)
+
+paradise.rent.2016 <- paradise.rent.2016 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+paradise.rent.2016 <- na.omit(paradise.rent.2016)
+
+allegiant_stadium <- mb_geocode("Allegiant Stadium, Paradise NV")
+minutes_to_allegiant <- mb_matrix(paradise.rent.2016, allegiant_stadium)
+
+paradise.rent.2016$minutes <- as.numeric(minutes_to_allegiant)
+
+paradise.rent.2016 <- paradise.rent.2016 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+paradise.rent.2016$year <- 2016
+
+
+##paradise 2017 RENT
+paradise.rent.2017 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "NV",
+  county = "Clark",
+  geometry = TRUE,
+  output = "wide",
+  year = 2017
+)
+
+paradise.rent.2017 <- paradise.rent.2017 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+paradise.rent.2017 <- na.omit(paradise.rent.2017)
+
+allegiant_stadium <- mb_geocode("Allegiant Stadium, Paradise NV")
+minutes_to_allegiant <- mb_matrix(paradise.rent.2017, allegiant_stadium)
+
+paradise.rent.2017$minutes <- as.numeric(minutes_to_allegiant)
+
+paradise.rent.2017 <- paradise.rent.2017 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+paradise.rent.2017$year <- 2017
+
+
+
+
+##paradise 2018 RENT
+paradise.rent.2018 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "NV",
+  county = "Clark",
+  geometry = TRUE,
+  output = "wide",
+  year = 2018
+)
+
+paradise.rent.2018 <- paradise.rent.2018 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+paradise.rent.2018 <- na.omit(paradise.rent.2018)
+
+allegiant_stadium <- mb_geocode("Allegiant Stadium, Paradise NV")
+minutes_to_allegiant <- mb_matrix(paradise.rent.2018, allegiant_stadium)
+
+paradise.rent.2018$minutes <- as.numeric(minutes_to_allegiant)
+
+paradise.rent.2018 <- paradise.rent.2018 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+paradise.rent.2018$year <- 2018
+
+
+
+##paradise 2019 RENT
+paradise.rent.2019 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "NV",
+  county = "Clark",
+  geometry = TRUE,
+  output = "wide",
+  year = 2019
+)
+
+paradise.rent.2019 <- paradise.rent.2019 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+paradise.rent.2019 <- na.omit(paradise.rent.2019)
+
+allegiant_stadium <- mb_geocode("Allegiant Stadium, Paradise NV")
+minutes_to_allegiant <- mb_matrix(paradise.rent.2019, allegiant_stadium)
+
+paradise.rent.2019$minutes <- as.numeric(minutes_to_allegiant)
+
+paradise.rent.2019 <- paradise.rent.2019 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+paradise.rent.2019$year <- 2019
+
+
+paradise.rent <- rbind(paradise.rent.2014, paradise.rent.2015, paradise.rent.2016,
+                       paradise.rent.2017, paradise.rent.2018, paradise.rent.2019)
+
+
+
+##minneapolis 2010 RENT
+minneapolis.rent.2010 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "MN",
+  county = "Hennepin",
+  geometry = TRUE,
+  output = "wide",
+  year = 2010
+)
+
+minneapolis.rent.2010 <- minneapolis.rent.2010 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+minneapolis.rent.2010 <- na.omit(minneapolis.rent.2010)
+
+usbank_stadium <- mb_geocode("usbank Stadium, minneapolis NV")
+minutes_to_usbank <- mb_matrix(minneapolis.rent.2010, usbank_stadium)
+
+minneapolis.rent.2010$minutes <- as.numeric(minutes_to_usbank)
+
+minneapolis.rent.2010 <- minneapolis.rent.2010 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+minneapolis.rent.2010$year <- 2010
+
+
+##minneapolis 2011 RENT
+minneapolis.rent.2011 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "MN",
+  county = "Hennepin",
+  geometry = TRUE,
+  output = "wide",
+  year = 2011
+)
+
+minneapolis.rent.2011 <- minneapolis.rent.2011 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+minneapolis.rent.2011 <- na.omit(minneapolis.rent.2011)
+
+usbank_stadium <- mb_geocode("usbank Stadium, minneapolis NV")
+minutes_to_usbank <- mb_matrix(minneapolis.rent.2011, usbank_stadium)
+
+minneapolis.rent.2011$minutes <- as.numeric(minutes_to_usbank)
+
+minneapolis.rent.2011 <- minneapolis.rent.2011 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+minneapolis.rent.2011$year <- 2011
+
+
+##minneapolis 2012 RENT
+minneapolis.rent.2012 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "MN",
+  county = "Hennepin",
+  geometry = TRUE,
+  output = "wide",
+  year = 2012
+)
+
+minneapolis.rent.2012 <- minneapolis.rent.2012 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+minneapolis.rent.2012 <- na.omit(minneapolis.rent.2012)
+
+usbank_stadium <- mb_geocode("usbank Stadium, minneapolis NV")
+minutes_to_usbank <- mb_matrix(minneapolis.rent.2012, usbank_stadium)
+
+minneapolis.rent.2012$minutes <- as.numeric(minutes_to_usbank)
+
+minneapolis.rent.2012 <- minneapolis.rent.2012 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+minneapolis.rent.2012$year <- 2012
+
+
+##minneapolis 2013 RENT
+minneapolis.rent.2013 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "MN",
+  county = "Hennepin",
+  geometry = TRUE,
+  output = "wide",
+  year = 2013
+)
+
+minneapolis.rent.2013 <- minneapolis.rent.2013 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+minneapolis.rent.2013 <- na.omit(minneapolis.rent.2013)
+
+usbank_stadium <- mb_geocode("usbank Stadium, minneapolis NV")
+minutes_to_usbank <- mb_matrix(minneapolis.rent.2013, usbank_stadium)
+
+minneapolis.rent.2013$minutes <- as.numeric(minutes_to_usbank)
+
+minneapolis.rent.2013 <- minneapolis.rent.2013 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+minneapolis.rent.2013$year <- 2013
+
+##minneapolis 2014 RENT
+minneapolis.rent.2014 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "MN",
+  county = "Hennepin",
+  geometry = TRUE,
+  output = "wide",
+  year = 2014
+)
+
+minneapolis.rent.2014 <- minneapolis.rent.2014 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+minneapolis.rent.2014 <- na.omit(minneapolis.rent.2014)
+
+usbank_stadium <- mb_geocode("usbank Stadium, minneapolis NV")
+minutes_to_usbank <- mb_matrix(minneapolis.rent.2014, usbank_stadium)
+
+minneapolis.rent.2014$minutes <- as.numeric(minutes_to_usbank)
+
+minneapolis.rent.2014 <- minneapolis.rent.2014 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+minneapolis.rent.2014$year <- 2014
+
+
+
+
+##minneapolis 2015 RENT
+minneapolis.rent.2015 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "MN",
+  county = "Hennepin",
+  geometry = TRUE,
+  output = "wide",
+  year = 2015
+)
+
+minneapolis.rent.2015 <- minneapolis.rent.2015 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+minneapolis.rent.2015 <- na.omit(minneapolis.rent.2015)
+
+usbank_stadium <- mb_geocode("US Bank Stadium, Minneapolis MN")
+minutes_to_usbank <- mb_matrix(minneapolis.rent.2015, usbank_stadium)
+
+minneapolis.rent.2015$minutes <- as.numeric(minutes_to_usbank)
+
+minneapolis.rent.2015 <- minneapolis.rent.2015 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+minneapolis.rent.2015$year <- 2015
+
+
+
+##minneapolis 2016 RENT
+minneapolis.rent.2016 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "MN",
+  county = "Hennepin",
+  geometry = TRUE,
+  output = "wide",
+  year = 2016
+)
+
+minneapolis.rent.2016 <- minneapolis.rent.2016 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+minneapolis.rent.2016 <- na.omit(minneapolis.rent.2016)
+
+usbank_stadium <- mb_geocode("US Bank Stadium, Minneapolis MN")
+minutes_to_usbank <- mb_matrix(minneapolis.rent.2016, usbank_stadium)
+
+minneapolis.rent.2016$minutes <- as.numeric(minutes_to_usbank)
+
+minneapolis.rent.2016 <- minneapolis.rent.2016 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+minneapolis.rent.2016$year <- 2016
+
+
+##minneapolis 2017 RENT
+minneapolis.rent.2017 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "MN",
+  county = "Hennepin",
+  geometry = TRUE,
+  output = "wide",
+  year = 2017
+)
+
+minneapolis.rent.2017 <- minneapolis.rent.2017 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+minneapolis.rent.2017 <- na.omit(minneapolis.rent.2017)
+
+usbank_stadium <- mb_geocode("US Bank Stadium, Minneapolis MN")
+minutes_to_usbank <- mb_matrix(minneapolis.rent.2017, usbank_stadium)
+
+minneapolis.rent.2017$minutes <- as.numeric(minutes_to_usbank)
+
+minneapolis.rent.2017 <- minneapolis.rent.2017 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+minneapolis.rent.2017$year <- 2017
+
+
+
+
+##minneapolis 2018 RENT
+minneapolis.rent.2018 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "MN",
+  county = "Hennepin",
+  geometry = TRUE,
+  output = "wide",
+  year = 2018
+)
+
+minneapolis.rent.2018 <- minneapolis.rent.2018 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+minneapolis.rent.2018 <- na.omit(minneapolis.rent.2018)
+
+usbank_stadium <- mb_geocode("US Bank Stadium, Minneapolis MN")
+minutes_to_usbank <- mb_matrix(minneapolis.rent.2018, usbank_stadium)
+
+minneapolis.rent.2018$minutes <- as.numeric(minutes_to_usbank)
+
+minneapolis.rent.2018 <- minneapolis.rent.2018 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+minneapolis.rent.2018$year <- 2018
+
+
+
+##minneapolis 2019 RENT
+minneapolis.rent.2019 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "MN",
+  county = "Hennepin",
+  geometry = TRUE,
+  output = "wide",
+  year = 2019
+)
+
+minneapolis.rent.2019 <- minneapolis.rent.2019 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+minneapolis.rent.2019 <- na.omit(minneapolis.rent.2019)
+
+usbank_stadium <- mb_geocode("US Bank Stadium, Minneapolis MN")
+minutes_to_usbank <- mb_matrix(minneapolis.rent.2019, usbank_stadium)
+
+minneapolis.rent.2019$minutes <- as.numeric(minutes_to_usbank)
+
+minneapolis.rent.2019 <- minneapolis.rent.2019 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+minneapolis.rent.2019$year <- 2019
+
+
+minneapolis.rent <- rbind(minneapolis.rent.2010, minneapolis.rent.2011, minneapolis.rent.2012, minneapolis.rent.2013,
+                          minneapolis.rent.2014, minneapolis.rent.2015, minneapolis.rent.2016,
+                          minneapolis.rent.2017, minneapolis.rent.2018, minneapolis.rent.2019)
+
+##atlanta 2010 RENT
+atlanta.rent.2010 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  output = "wide",
+  year = 2010
+)
+
+atlanta.rent.2010 <- atlanta.rent.2010 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+atlanta.rent.2010 <- na.omit(atlanta.rent.2010)
+
+mercedes_stadium <- mb_geocode("Mercedes-Benz Stadium, Atlanta GA")
+minutes_to_mercedes <- mb_matrix(atlanta.rent.2010, mercedes_stadium)
+
+atlanta.rent.2010$minutes <- as.numeric(minutes_to_mercedes)
+
+atlanta.rent.2010 <- atlanta.rent.2010 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+atlanta.rent.2010$year <- 2010
+
+
+##atlanta 2011 RENT
+atlanta.rent.2011 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  output = "wide",
+  year = 2011
+)
+
+atlanta.rent.2011 <- atlanta.rent.2011 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+atlanta.rent.2011 <- na.omit(atlanta.rent.2011)
+
+mercedes_stadium <- mb_geocode("Mercedes-Benz Stadium, Atlanta GA")
+minutes_to_mercedes <- mb_matrix(atlanta.rent.2011, mercedes_stadium)
+
+atlanta.rent.2011$minutes <- as.numeric(minutes_to_mercedes)
+
+atlanta.rent.2011 <- atlanta.rent.2011 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+atlanta.rent.2011$year <- 2011
+
+
+
+##atlanta 2012 RENT
+atlanta.rent.2012 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  output = "wide",
+  year = 2012
+)
+
+atlanta.rent.2012 <- atlanta.rent.2012 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+atlanta.rent.2012 <- na.omit(atlanta.rent.2012)
+
+mercedes_stadium <- mb_geocode("Mercedes-Benz Stadium, Atlanta GA")
+minutes_to_mercedes <- mb_matrix(atlanta.rent.2012, mercedes_stadium)
+
+atlanta.rent.2012$minutes <- as.numeric(minutes_to_mercedes)
+
+atlanta.rent.2012 <- atlanta.rent.2012 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+atlanta.rent.2012$year <- 2012
+
+
+
+##atlanta 2013 RENT
+atlanta.rent.2013 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  output = "wide",
+  year = 2013
+)
+
+atlanta.rent.2013 <- atlanta.rent.2013 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+atlanta.rent.2013 <- na.omit(atlanta.rent.2013)
+
+mercedes_stadium <- mb_geocode("Mercedes-Benz Stadium, Atlanta GA")
+minutes_to_mercedes <- mb_matrix(atlanta.rent.2013, mercedes_stadium)
+
+atlanta.rent.2013$minutes <- as.numeric(minutes_to_mercedes)
+
+atlanta.rent.2013 <- atlanta.rent.2013 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+atlanta.rent.2013$year <- 2013
+
+
+
+##atlanta 2014 RENT
+atlanta.rent.2014 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  output = "wide",
+  year = 2014
+)
+
+atlanta.rent.2014 <- atlanta.rent.2014 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+atlanta.rent.2014 <- na.omit(atlanta.rent.2014)
+
+mercedes_stadium <- mb_geocode("Mercedes-Benz Stadium, Atlanta GA")
+minutes_to_mercedes <- mb_matrix(atlanta.rent.2014, mercedes_stadium)
+
+atlanta.rent.2014$minutes <- as.numeric(minutes_to_mercedes)
+
+atlanta.rent.2014 <- atlanta.rent.2014 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+atlanta.rent.2014$year <- 2014
+
+
+
+
+##atlanta 2015 RENT
+atlanta.rent.2015 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  output = "wide",
+  year = 2015
+)
+
+atlanta.rent.2015 <- atlanta.rent.2015 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+atlanta.rent.2015 <- na.omit(atlanta.rent.2015)
+
+mercedes_stadium <- mb_geocode("Mercedes-Benz Stadium, Atlanta GA")
+minutes_to_mercedes <- mb_matrix(atlanta.rent.2015, mercedes_stadium)
+
+atlanta.rent.2015$minutes <- as.numeric(minutes_to_mercedes)
+
+atlanta.rent.2015 <- atlanta.rent.2015 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+atlanta.rent.2015$year <- 2015
+
+
+
+##atlanta 2016 RENT
+atlanta.rent.2016 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  output = "wide",
+  year = 2016
+)
+
+atlanta.rent.2016 <- atlanta.rent.2016 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+atlanta.rent.2016 <- na.omit(atlanta.rent.2016)
+
+mercedes_stadium <- mb_geocode("Mercedes-Benz Stadium, Atlanta GA")
+minutes_to_mercedes <- mb_matrix(atlanta.rent.2016, mercedes_stadium)
+
+atlanta.rent.2016$minutes <- as.numeric(minutes_to_mercedes)
+
+atlanta.rent.2016 <- atlanta.rent.2016 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+atlanta.rent.2016$year <- 2016
+
+
+##atlanta 2017 RENT
+atlanta.rent.2017 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  output = "wide",
+  year = 2017
+)
+
+atlanta.rent.2017 <- atlanta.rent.2017 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+atlanta.rent.2017 <- na.omit(atlanta.rent.2017)
+
+mercedes_stadium <- mb_geocode("Mercedes-Benz Stadium, Atlanta GA")
+minutes_to_mercedes <- mb_matrix(atlanta.rent.2017, mercedes_stadium)
+
+atlanta.rent.2017$minutes <- as.numeric(minutes_to_mercedes)
+
+atlanta.rent.2017 <- atlanta.rent.2017 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+atlanta.rent.2017$year <- 2017
+
+
+
+
+##atlanta 2018 RENT
+atlanta.rent.2018 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  output = "wide",
+  year = 2018
+)
+
+atlanta.rent.2018 <- atlanta.rent.2018 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+atlanta.rent.2018 <- na.omit(atlanta.rent.2018)
+
+mercedes_stadium <- mb_geocode("Mercedes-Benz Stadium, Atlanta GA")
+minutes_to_mercedes <- mb_matrix(atlanta.rent.2018, mercedes_stadium)
+
+atlanta.rent.2018$minutes <- as.numeric(minutes_to_mercedes)
+
+atlanta.rent.2018 <- atlanta.rent.2018 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+atlanta.rent.2018$year <- 2018
+
+
+
+##atlanta 2019 RENT
+atlanta.rent.2019 <- get_acs(
+  geography = "tract",
+  variables = rent.and.income,
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  output = "wide",
+  year = 2019
+)
+
+atlanta.rent.2019 <- atlanta.rent.2019 %>%
+  select(GEOID, NAME, mean.rentE, mean.incomeE, geometry) %>%
+  mutate(monthly.income = mean.incomeE / 12) %>%
+  mutate(rent.to.income = mean.rentE / monthly.income)
+
+atlanta.rent.2019 <- na.omit(atlanta.rent.2019)
+
+mercedes_stadium <- mb_geocode("Mercedes-Benz Stadium, Atlanta GA")
+minutes_to_mercedes <- mb_matrix(atlanta.rent.2019, mercedes_stadium)
+
+atlanta.rent.2019$minutes <- as.numeric(minutes_to_mercedes)
+
+atlanta.rent.2019 <- atlanta.rent.2019 %>%
+  filter(minutes <= 40) %>%
+  filter(rent.to.income < 1)
+
+atlanta.rent.2019$year <- 2019
+
+
+atlanta.rent <- rbind(atlanta.rent.2010, atlanta.rent.2011, atlanta.rent.2012, atlanta.rent.2013,
+                      atlanta.rent.2014, atlanta.rent.2015, atlanta.rent.2016,
+                      atlanta.rent.2017, atlanta.rent.2018, atlanta.rent.2019)
+
+ggplot(data = atlanta.rent, aes(x = minutes, y = rent.to.income)) +
+  geom_point(alpha = .40) +
+  geom_smooth(se = FALSE) +
+  theme_minimal() +
+  facet_grid(.~year) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 8)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  theme_bw() +
+  theme(panel.background=element_rect(fill="#FFFFFF")) +
+  theme(plot.background=element_rect(fill="#FFFFFF")) +
+  theme(panel.border=element_rect(colour="#FFFFFF")) +
+  theme(panel.grid.major=element_line(colour="#F3F3F3",size=.75)) +
+  theme(panel.grid.minor = element_blank()) +
+  theme(axis.ticks = element_blank()) +
+  theme(axis.text.x=element_text(size=8,colour="#000000",face="bold")) +
+  theme(axis.text.y=element_text(size=8,colour="#000000",face="bold")) +
+  theme(axis.title.y=element_text(size=11,colour="#000000",face="bold",vjust=1.5)) +
+  theme(axis.title.x=element_text(size=11,colour="#000000",face="bold",vjust=-.5)) +
+  theme(plot.title=element_text(face="bold", colour="#000000",size=15)) +
+  xlab("Minutes from SoFi Stadium") +
+  ylab("Income to Rent Ratio")
+
+#####combing all rent
+atlanta.rent$stadium <- "mercedes"
+inglewood.rent$stadium <- "sofi"
+minneapolis.rent$stadium <- "usbank"
+paradise.rent$stadium <- "allegiant"
+
+combined.rent <- rbind(atlanta.rent, inglewood.rent, minneapolis.rent, paradise.rent)
+
+combined.rent %>%
+  filter(year >= 2014) %>%
+  filter(distance <= 20) %>%
+  ggplot(aes(x = distance, y = rent.to.income, color = stadium)) +
+  geom_point(alpha = 0.10, stat = "identity") +
+  geom_hline(yintercept = .30, linetype = "dashed") +
+  geom_smooth(se = FALSE, size = 1.25) +
+  scale_color_brewer(palette = "Spectral",
+                     labels = c("Allegiant Stadium",
+                                "Mercedes-Benz Stadium",
+                                "SoFi Stadium",
+                                "U.S. Bank Stadium")) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 5)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 8),
+                     labels = scales::percent_format(accuracy = 1)) +
+  coord_cartesian(ylim = c(.10, .35)) +
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "#FFFFFF"),
+    plot.background = element_rect(fill = "#FFFFFF"),
+    panel.border = element_blank(),
+    panel.grid.major = element_line(color = "#F3F3F3", size = .75),
+    panel.grid.minor = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text.x = element_text(size = 11,
+                               colour = "black",
+                               face = "bold",
+                               family = "pathway gothic"),
+    axis.text.y = element_text(size = 11,
+                               color = "black",
+                               face = "bold",
+                               family = "pathway gothic"),
+    axis.title.x = element_text(size = 12,
+                                color = "black",
+                                face = "bold",
+                                family = "pathway gothic",
+                                vjust = -1.5),
+    axis.title.y = element_text(size = 12,
+                                color = "black",
+                                face = "bold",
+                                family = "pathway gothic"),
+    strip.text.x = element_text(size = 12,
+                                color = "black",
+                                face = "bold",
+                                family = "pathway gothic"),
+    strip.background = element_blank(),
+    legend.text = element_text(size = 12,
+                               color = "black",
+                               face = "bold",
+                               family = "pathway gothic"),
+    legend.position = c(.50,.90),
+    legend.background = element_blank()) +
+  xlab("Miles from Respective Stadium") +
+  ylab("Income to Rent Ratio") +
+  labs(color = "") + 
+  guides(color = guide_legend(nrow = 1)) +
+  facet_grid(.~year)
+
+ggsave("rent-to-income.png", dpi = 400)
+
+
+######################
+## RENT AND DISTANCE DID
+######################
+
+#########
+##SOFI STADIUM
+#########
+inglewood.rent <- inglewood.rent %>%
+  mutate(sofilat = 33.95356,
+         sofilon = -118.33859)
+
+stadium <- inglewood.rent %>%
+  select(sofilon, sofilat) %>%
+  st_drop_geometry() %>%
+  distinct() %>%
+  st_as_sf(coords = c("sofilon", "sofilat"), crs = "NAD83")
+
+inglewood.rent <- inglewood.rent %>%
+  select(GEOID:year) %>%
+  mutate(centroid = st_point_on_surface(geometry)) %>%
+  st_set_geometry("centroid") %>%
+  mutate(distance_to_stadium = st_distance(centroid, stadium) %>%
+           as.numeric)
+
+inglewood.rent <- inglewood.rent %>%
+  mutate(distance = distance_to_stadium * 0.000621)
+
+inglewood.rent$distance_to_stadium <- NULL
+inglewood.rent$centroid <- NULL
+
+inglewood.rent <- inglewood.rent %>%
+  mutate(distance_ord = factor(
+    case_when(
+      distance <= 5 ~ "Short",
+      distance >= 5.000001 & distance <= 10 ~ "Moderate",
+      distance >= 10.000001 & distance <= 15 ~ "Long",
+      distance >= 15.000001 & distance <= 20 ~ "Very Long")))
+
+##CREATING YEAR ORDINANCE FOR DID REGRESSION MODEL
+inglewood.rent$year_ord <- as.numeric(inglewood.rent$year >= 2016)
+
+
+
+#########
+##US BANK STADIUM
+#########
+minneapolis.rent <- minneapolis.rent %>%
+  mutate(sofilat = 44.97377,
+         sofilon = -93.25750)
+
+stadium <- minneapolis.rent %>%
+  select(sofilon, sofilat) %>%
+  st_drop_geometry() %>%
+  distinct() %>%
+  st_as_sf(coords = c("sofilon", "sofilat"), crs = "NAD83")
+
+minneapolis.rent <- minneapolis.rent %>%
+  select(GEOID:year) %>%
+  mutate(centroid = st_point_on_surface(geometry)) %>%
+  st_set_geometry("centroid") %>%
+  mutate(distance_to_stadium = st_distance(centroid, stadium) %>%
+           as.numeric)
+
+minneapolis.rent <- minneapolis.rent %>%
+  mutate(distance = distance_to_stadium * 0.000621)
+
+minneapolis.rent$distance_to_stadium <- NULL
+minneapolis.rent$centroid <- NULL
+
+minneapolis.rent <- minneapolis.rent %>%
+  mutate(distance_ord = factor(
+    case_when(
+      distance <= 5 ~ "Short",
+      distance >= 5.000001 & distance <= 10 ~ "Moderate",
+      distance >= 10.000001 & distance <= 15 ~ "Long",
+      distance >= 15.000001 & distance <= 20 ~ "Very Long")))
+
+minneapolis.rent$year_ord <- as.numeric(minneapolis.rent$year >= 2013)
+
+
+#########
+##MERCEDES BENZ STADIUM
+#########
+atlanta.rent <- atlanta.rent %>%
+  mutate(sofilat = 33.75537,
+         sofilon = -84.40059)
+
+stadium <- atlanta.rent %>%
+  select(sofilon, sofilat) %>%
+  st_drop_geometry() %>%
+  distinct() %>%
+  st_as_sf(coords = c("sofilon", "sofilat"), crs = "NAD83")
+
+atlanta.rent <- atlanta.rent %>%
+  select(GEOID:year) %>%
+  mutate(centroid = st_point_on_surface(geometry)) %>%
+  st_set_geometry("centroid") %>%
+  mutate(distance_to_stadium = st_distance(centroid, stadium) %>%
+           as.numeric)
+
+atlanta.rent <- atlanta.rent %>%
+  mutate(distance = distance_to_stadium * 0.000621)
+
+atlanta.rent$distance_to_stadium <- NULL
+atlanta.rent$centroid <- NULL
+
+atlanta.rent <- atlanta.rent %>%
+  mutate(distance_ord = factor(
+    case_when(
+      distance <= 5 ~ "Short",
+      distance >= 5.000001 & distance <= 10 ~ "Moderate",
+      distance >= 10.000001 & distance <= 15 ~ "Long",
+      distance >= 15.000001 & distance <= 20 ~ "Very Long")))
+
+##CREATING YEAR ORDINANCE FOR DID REGRESSION MODEL
+atlanta.rent$year_ord <- as.numeric(atlanta.rent$year >= 2014)
+
+
+#########
+##ALLEGIANT STADIUM
+#########
+paradise.rent <- paradise.rent %>%
+  mutate(sofilat = 36.09109,
+         sofilon = -115.18334)
+
+stadium <- paradise.rent %>%
+  select(sofilon, sofilat) %>%
+  st_drop_geometry() %>%
+  distinct() %>%
+  st_as_sf(coords = c("sofilon", "sofilat"), crs = "NAD83")
+
+paradise.rent <- paradise.rent %>%
+  select(GEOID:year) %>%
+  mutate(centroid = st_point_on_surface(geometry)) %>%
+  st_set_geometry("centroid") %>%
+  mutate(distance_to_stadium = st_distance(centroid, stadium) %>%
+           as.numeric)
+
+paradise.rent <- paradise.rent %>%
+  mutate(distance = distance_to_stadium * 0.000621)
+
+paradise.rent$distance_to_stadium <- NULL
+paradise.rent$centroid <- NULL
+
+paradise.rent <- paradise.rent %>%
+  mutate(distance_ord = factor(
+    case_when(
+      distance <= 5 ~ "Short",
+      distance >= 5.000001 & distance <= 10 ~ "Moderate",
+      distance >= 10.000001 & distance <= 15 ~ "Long",
+      distance >= 15.000001 & distance <= 20 ~ "Very Long")))
+
+
+##CREATING YEAR ORDINANCE FOR DID REGRESSION MODEL
+paradise.rent$year_ord <- as.numeric(paradise.rent$year >= 2017)
+
+
+
+####################
+## REGRESSIONS
+####################
+
+sofi.rent.model <- lm(mean.rentE ~ distance_ord * year_ord, data = inglewood.rent)
+summary(sofi.rent.model)
+
+mercedes.rent.model <- lm(mean.rentE ~ distance_ord * year_ord, data = atlanta.rent)
+summary(mercedes.rent.model)
+
+paradise.rent.model <- lm(mean.rentE ~ distance_ord * year_ord, data = paradise.rent)
+summary(paradise.rent.model)
+
+minneapolis.rent.model <- lm(mean.rentE ~ distance_ord * year_ord, data = minneapolis.rent)
+summary(minneapolis.rent.model)
+
+
+
+####################
+## RACE DEMOGRAPHI PLOTTING
+####################
+
+inglewood.race <- get_acs(
+  geography = "tract",
+  variables = c(white = "B03002_003",
+  black = "B03002_004",
+  asian = "B03002_006",
+  hispanic = "B03002_012"
+),
+state = "CA",
+county = "Los Angeles",
+geometry = TRUE,
+year = 2014,
+summary_var = "B03001_001") %>%
+  mutate(percent = 100 * (estimate / summary_est))
+
+inglewood.race <- inglewood.race[,c(1,2,3,4,5,6,7,9,8)]
+
+inglewood.race <- inglewood.race %>%
+  mutate(sofilat = 33.95356,
+         sofilon = -118.33859)
+
+stadium <- inglewood.race %>%
+  select(sofilon, sofilat) %>%
+  st_drop_geometry() %>%
+  distinct() %>%
+  st_as_sf(coords = c("sofilon", "sofilat"), crs = "NAD83")
+
+inglewood.race <- inglewood.race %>%
+  select(GEOID:percent) %>%
+  mutate(centroid = st_point_on_surface(geometry)) %>%
+  st_set_geometry("centroid") %>%
+  mutate(distance_to_stadium = st_distance(centroid, stadium) %>%
+           as.numeric)
+
+inglewood.race <- inglewood.race %>%
+  mutate(distance = distance_to_stadium * 0.000621)
+
+inglewood.race$distance_to_stadium <- NULL
+inglewood.race$centroid <- NULL
+
+inglewood.race <- inglewood.race %>%
+  mutate(distance_ord = factor(
+    case_when(
+      distance <= 5 ~ "Short",
+      distance >= 5.000001 & distance <= 10 ~ "Moderate",
+      distance >= 10.000001 & distance <= 15 ~ "Long",
+      distance >= 15.000001 & distance <= 20 ~ "Very Long")))
+
+inglewood.race %>%
+  group_by(distance_ord, variable) %>%
+  filter(!is.na(distance_ord)) %>%
+  dplyr::summarize(mean.pct = mean(percent, na.rm = T))
+
