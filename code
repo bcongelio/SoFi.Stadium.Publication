@@ -34,10 +34,10 @@ options(scipen = 999)
 ## PROVIDING API TO CONNECT TO MAPBOX API
 ####################
 
-census_api_key("1a47c66da9f6c0239edead6eebbf3bceafcf6dca", install = TRUE, overwrite = TRUE) ##FOR TIDYCENSUS
+census_api_key("ENTER API KEY HERE ... removed mine for privacy", install = TRUE, overwrite = TRUE) ##FOR TIDYCENSUS
 readRenviron("~/.Renviron")
 
-my_token <- "pk.eyJ1IjoiYmNvbmdlbGlvIiwiYSI6ImNsMDMxeHRyMzAxZHozam55a2pjcjMwNzcifQ.TTGfqoe0h9nOkpjQmowdFw"
+my_token <- "ENTER API KEY HERE ... removed mine for privacy"
 mb_access_token(my_token, install = TRUE, overwrite = TRUE) ##FOR MAPBOX API
 Sys.getenv("MAPBOX_PUBLIC_TOKEN")
 readRenviron("~/.Renviron")
